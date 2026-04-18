@@ -41,6 +41,39 @@ const downloadAllAsZip = async (slides) => {
   URL.revokeObjectURL(url);
 };
 
+// --- TEXT SANITIZER: Strips markdown, special chars, and formatting artifacts ---
+const sanitizeText = (raw) => {
+  return raw
+    .replace(/\*\*|__/g, "")           // Remove bold markdown
+    .replace(/\*|_/g, "")              // Remove italic markdown
+    .replace(/^[-–—•]\s*/gm, "")       // Remove bullet dashes
+    .replace(/^#{1,6}\s*/gm, "")       // Remove markdown headers
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // [link text](url) → link text
+    .replace(/`/g, "")                 // Remove backticks
+    .replace(/\n{3,}/g, "\n\n")        // Collapse excessive newlines
+    .trim();
+};
+
+// --- REGEX EXTRACTOR: Pulls Texto: and Escena: fields if present ---
+const extractFields = (block) => {
+  const textoMatch = block.match(/(?:texto|text)\s*:\s*(.+?)(?=(?:escena|scene|contexto|context|estilo|style)\s*:|$)/is);
+  const escenaMatch = block.match(/(?:escena|scene)\s*:\s*(.+?)(?=(?:texto|text|contexto|context|estilo|style)\s*:|$)/is);
+
+  if (textoMatch) {
+    // Structured format detected — extract only tagged fields
+    return {
+      displayText: sanitizeText(textoMatch[1].trim()),
+      sceneOverride: escenaMatch ? sanitizeText(escenaMatch[1].trim()) : null,
+    };
+  }
+
+  // No structured tags — treat the whole block as display text
+  return {
+    displayText: sanitizeText(block.trim()),
+    sceneOverride: null,
+  };
+};
+
 // --- SCRIPT PROCESSOR: Splits the script into narrative segments ---
 const processScript = (rawScript, numSlides, keyword) => {
   // Split by double newlines, numbered lines, or "Slide" markers
@@ -52,126 +85,176 @@ const processScript = (rawScript, numSlides, keyword) => {
   const segments = [];
 
   if (lines.length >= numSlides) {
-    // Enough explicit segments
     for (let i = 0; i < numSlides; i++) {
       segments.push(lines[i]);
     }
   } else {
-    // Auto-distribute text across slides
-    const words = rawScript.split(/\s+/);
+    const words = sanitizeText(rawScript).split(/\s+/);
     const perSlide = Math.ceil(words.length / numSlides);
     for (let i = 0; i < numSlides; i++) {
       segments.push(words.slice(i * perSlide, (i + 1) * perSlide).join(" "));
     }
   }
 
-  // Tag each segment with its narrative role
-  return segments.map((text, i) => {
+  // Tag each segment with its narrative role + extract clean text
+  return segments.map((rawBlock, i) => {
+    const { displayText, sceneOverride } = extractFields(rawBlock);
     let role, placement, sceneHint;
+
     if (i === 0) {
       role = "HOOK";
       placement = "CENTER";
-      sceneHint = "dramatic close-up of the expert looking directly at camera with intense lighting, bold energy";
+      sceneHint = "The character is looking directly at the viewer with an intense, provocative expression — raised eyebrow, slight smirk, confrontational energy. Dramatic close-up, dynamic angle from slightly below.";
     } else if (i === numSlides - 1) {
       role = "CTA";
       placement = "CENTER";
-      sceneHint = "expert pointing at camera or gesturing invitingly, bright and clean background";
-      text = text.includes(keyword) ? text : `${text}\n\nComenta "${keyword}"`;
+      sceneHint = "The character is pointing directly at the viewer with a big confident smile, inviting and energetic body language. Open posture, bright and vibrant background with high energy.";
     } else if (i <= Math.floor(numSlides / 2)) {
       role = "PROBLEM";
       placement = "BOTTOM";
-      sceneHint = "expert with serious/concerned expression, slightly moody atmospheric lighting";
+      sceneHint = "The character has a frustrated, disappointed, or concerned facial expression — furrowed brow, maybe arms crossed or palm on forehead. Moody atmospheric lighting, darker tones.";
     } else {
       role = "SOLUTION";
       placement = "TOP";
-      sceneHint = "expert smiling confidently, bright uplifting lighting, professional setting";
+      sceneHint = "The character is smiling confidently with an 'I've got the answer' expression — finger raised making a point, or gesturing with conviction. Bright uplifting lighting, optimistic atmosphere.";
     }
-    return { index: i, role, text, placement, sceneHint };
+
+    // Use scene override from structured input if available
+    if (sceneOverride) sceneHint = sceneOverride;
+
+    // Append CTA keyword if missing on last slide
+    let finalText = displayText;
+    if (role === "CTA" && !finalText.includes(keyword)) {
+      finalText = `${finalText}\n\nComenta "${keyword}"`;
+    }
+
+    return { index: i, role, text: finalText, placement, sceneHint };
   });
 };
 
 // --- STYLE PRESETS ---
 const STYLES = {
-  modern: {
-    label: "Moderno Profesional",
-    prompt: "Clean, modern professional marketing design. Soft gradient background, high-end corporate aesthetic, sleek minimalist composition with premium feel. Professional studio lighting.",
+  gta: {
+    label: "GTA V / Novela Gráfica",
+    prompt: "Grand Theft Auto V loading screen art style. Hard cel-shading shadows, thick black ink outlines, high contrast, saturated colors, dramatic angles. The character should look like a stylized GTA V cover illustration with bold graphic novel aesthetics.",
+    typography: "Use Impact or a bold condensed sans-serif font. ALL CAPS. The text must be WHITE with a thick BLACK outline/stroke around each letter (like meme/YouTube thumbnail style). Do NOT use the GTA stylized cursive font. Use plain, heavy, condensed Impact-style typography for maximum readability.",
   },
-  comic: {
-    label: "Cómic Retro",
-    prompt: "Retro comic book pop-art style with halftone dots, bold black outlines, saturated primary colors, speech bubbles aesthetic, vintage 60s comic book feel with Ben-Day dots.",
+  pixar: {
+    label: "Pixar / Disney 3D",
+    prompt: "Pixar and Disney 3D animated movie style. Smooth digital rendering, slightly exaggerated proportions, big expressive eyes, warm magical lighting with soft ambient glow, subsurface scattering on skin. The character should look like a Pixar movie protagonist — charming, polished, and cinematic.",
+    typography: "Use a friendly, rounded bold sans-serif font. White or bright colored text with a soft drop shadow for depth and legibility.",
   },
-  cinematic: {
-    label: "Cinematográfico",
-    prompt: "Cinematic movie poster style. Dramatic chiaroscuro lighting, film grain, anamorphic lens flare, deep shadows, epic blockbuster movie aesthetic, teal and orange color grading.",
+  retro: {
+    label: "Retro Comic 1950s",
+    prompt: "Classic 1950s-1960s Marvel/DC comic book style. Visible halftone printing dots (Ben-Day dots), limited vintage color palette (muted reds, yellows, blues), thick black ink outlines, hand-drawn crosshatching, aged paper texture. The character should look like a Golden Age comic book hero illustration.",
+    typography: "Use bold comic book caption box typography. Yellow or white text on a rectangular colored caption box, with thick black outlines on the letters, classic comic book style.",
   },
-  neon: {
-    label: "Neon Futurista",
-    prompt: "Futuristic neon cyberpunk aesthetic. Glowing neon lights, dark background with vibrant pink/cyan/purple neon accents, holographic elements, tech-forward digital feel.",
+  caricatura: {
+    label: "Caricatura",
+    prompt: "Exaggerated caricature illustration style. Oversized head with emphasized facial features, expressive cartoon proportions, bold outlines, vibrant flat colors, humorous and dynamic poses. The character should be a recognizable but playfully exaggerated caricature version of the reference person.",
+    typography: "Use bold, playful hand-drawn style lettering. Bright colored text with dark outlines, slightly uneven for a fun cartoon feel.",
+  },
+  libre: {
+    label: "🎨 Libre (Subí tu estilo)",
+    prompt: "CUSTOM_STYLE",
+    typography: "Use Impact or a bold condensed sans-serif font. ALL CAPS. The text must be WHITE with a thick BLACK outline/stroke around each letter for maximum readability.",
   },
 };
 
 // ============================================================
 // BUILD THE PROMPT FOR EACH SLIDE (NANO BANANO / GEMINI FLASH)
-// This is where the identity reference + text integration happens
+// ARCHITECTURE:
+// - The reference photo is used as a MODEL to redraw the person
+//   in the selected artistic style (NOT pasted as-is).
+// - Scene/style instructions are BACKGROUND context only.
+// - RENDER_TEXT is the ONLY text that appears on the image.
 // ============================================================
 const buildSlidePrompt = (segment, style, totalSlides) => {
-  const stylePrompt = STYLES[style]?.prompt || STYLES.modern.prompt;
+  const styleData = STYLES[style] || STYLES.gta;
+  const typographyPrompt = styleData.typography;
 
-  return `Create a professional Instagram carousel slide image (1080x1080 pixels, square format).
+  // For "libre" style, the visual style comes from the uploaded reference image
+  const isLibre = style === "libre";
+  const styleInstruction = isLibre
+    ? "Match the EXACT artistic style, color palette, rendering technique, and visual mood shown in the SECOND reference image (the style reference). Replicate that style precisely for the entire slide."
+    : styleData.prompt;
 
-SCENE DESCRIPTION: ${segment.sceneHint}
+  const cleanText = segment.text
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 
-VISUAL STYLE: ${stylePrompt}
+  return `Generate a 1080x1080 square Instagram carousel slide image.
 
-CHARACTER IDENTITY RULE (CRITICAL): The main person in this image MUST have the IDENTICAL facial features, hair, skin tone, and overall appearance as the person shown in the provided reference photo. Maintain perfect likeness consistency. Do NOT change their face, age, or features in any way.
+[CHARACTER DESIGN — USE FIRST REFERENCE IMAGE AS FACE MODEL ONLY]
+Study the FIRST reference image (the person's photo) carefully: note their face shape, hairstyle, hair color, skin tone, facial hair, and distinguishing features.
+Now REDRAW this person entirely from scratch in the following artistic style: ${styleInstruction}
+Do NOT paste, overlay, collage, or photoshop the reference photo into the image. The person must be fully illustrated/rendered in the artistic style — as if an artist drew them from the reference.
+The character must be RECOGNIZABLE as the same person but rendered 100% in the chosen art style.
 
-SLIDE CONTEXT: This is slide ${segment.index + 1} of ${totalSlides}. Role: ${segment.role}.
+[CHARACTER EXPRESSION & POSE — DO NOT RENDER AS TEXT]
+${segment.sceneHint}
 
-**MANDATORY TEXT INTEGRATION (MOST IMPORTANT RULE):**
-Render the following text EXACTLY as written on the image. Use clean, bold, high-contrast sans-serif typography. The text must be crisp, perfectly legible, and visually integrated into the composition.
+[VISUAL COMPOSITION — DO NOT RENDER AS TEXT]
+${isLibre ? "Replicate the exact style from the second reference image for backgrounds, lighting, colors, and overall composition." : `Scene style: ${styleInstruction}`}
+The entire image (background, character, typography) must be cohesive in the same artistic style.
 
-Place the text at the ${segment.placement} of the slide with adequate padding and a subtle semi-transparent background overlay behind the text for readability.
+[TEXT RENDERING — THIS IS THE ONLY TEXT THAT GOES ON THE IMAGE]
+RENDER_TEXT: "${cleanText}"
+Place this text at the ${segment.placement} of the image.
+TYPOGRAPHY STYLE: ${typographyPrompt}
 
-TEXT TO RENDER EXACTLY:
-"${segment.text}"
-
-Make sure:
-- Text is large enough to read on a phone screen
-- Letters are perfectly formed and spelled correctly
-- Text contrasts strongly against the background
-- The overall composition looks like a premium Instagram marketing slide`;
+STRICT RULES:
+- The character must be DRAWN/ILLUSTRATED in the art style, NOT a real photo.
+- ONLY render the exact text inside the RENDER_TEXT quotes on the image.
+- Do NOT render any words from the instructions, labels, or section headers.
+- Do NOT add slide numbers, counters, or pagination like "1/5".
+- The character's facial expression must match the mood of the text.
+- Text must be large enough to read on a phone screen.
+- The result must look like a premium illustrated Instagram carousel slide.`;
 };
 
 // ============================================================
 // API CALLER: Sends request to Gemini 2.5 Flash (Nano Banano)
-// Uses the reference image for identity consistency per slide
+// - First image: expert face reference (for identity)
+// - Second image (libre only): style visual reference
 // ============================================================
-const generateSlide = async (apiKey, referenceImageBase64, segment, style, totalSlides) => {
+const generateSlide = async (apiKey, referenceImageBase64, segment, style, totalSlides, model, styleRefBase64) => {
   const prompt = buildSlidePrompt(segment, style, totalSlides);
 
-  const requestBody = {
-    contents: [
-      {
-        parts: [
-          {
-            inlineData: {
-              mimeType: "image/jpeg",
-              data: referenceImageBase64,
-            },
-          },
-          {
-            text: prompt,
-          },
-        ],
+  // Build parts array: expert photo first, then prompt, then optional style ref
+  const parts = [
+    {
+      inlineData: {
+        mimeType: "image/jpeg",
+        data: referenceImageBase64,
       },
-    ],
+    },
+  ];
+
+  // For "libre" style, add the style reference as a second image
+  if (style === "libre" && styleRefBase64) {
+    parts.push({
+      inlineData: {
+        mimeType: "image/jpeg",
+        data: styleRefBase64,
+      },
+    });
+  }
+
+  parts.push({ text: prompt });
+
+  const requestBody = {
+    contents: [{ parts }],
     generationConfig: {
       responseModalities: ["TEXT", "IMAGE"],
     },
   };
 
+  // Use the selected model for the API call
+  const modelId = model || "gemini-2.5-flash-image";
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -205,12 +288,16 @@ const generateSlide = async (apiKey, referenceImageBase64, segment, style, total
 // ============================================================
 export default function NanoBananoCarousel() {
   const [apiKey, setApiKey] = useState("");
+  const [apiKeySaved, setApiKeySaved] = useState(false);
   const [expertPhoto, setExpertPhoto] = useState(null);
   const [expertPreview, setExpertPreview] = useState(null);
   const [keyword, setKeyword] = useState("");
   const [numSlides, setNumSlides] = useState(5);
   const [script, setScript] = useState("");
-  const [style, setStyle] = useState("modern");
+  const [style, setStyle] = useState("gta");
+  const [styleRefPhoto, setStyleRefPhoto] = useState(null);
+  const [styleRefPreview, setStyleRefPreview] = useState(null);
+  const [model, setModel] = useState("gemini-2.5-flash-image");
   const [slides, setSlides] = useState([]);
   const [generating, setGenerating] = useState(false);
   const [currentSlide, setCurrentSlide] = useState(0);
@@ -218,10 +305,47 @@ export default function NanoBananoCarousel() {
   const [error, setError] = useState("");
   const [log, setLog] = useState([]);
   const fileInputRef = useRef(null);
+  const styleRefInputRef = useRef(null);
+  const cancelRef = useRef(false);
+
+  // Load saved API key from persistent storage on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const result = await window.storage.get("nano-banano-api-key");
+        if (result && result.value) {
+          setApiKey(result.value);
+          setApiKeySaved(true);
+        }
+      } catch (e) {
+        // No saved key, that's fine
+      }
+    })();
+  }, []);
+
+  // Save API key to persistent storage when it changes
+  const handleApiKeyChange = async (newKey) => {
+    setApiKey(newKey);
+    setApiKeySaved(false);
+    if (newKey.trim()) {
+      try {
+        await window.storage.set("nano-banano-api-key", newKey.trim());
+        setApiKeySaved(true);
+      } catch (e) {
+        // Storage not available, key works for this session only
+      }
+    }
+  };
 
   const addLog = useCallback((msg) => {
     setLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
   }, []);
+
+  const handleCancel = () => {
+    cancelRef.current = true;
+    setGenerating(false);
+    setLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ⛔ Generación cancelada por el usuario.`]);
+  };
 
   const handlePhotoUpload = (e) => {
     const file = e.target.files?.[0];
@@ -229,6 +353,15 @@ export default function NanoBananoCarousel() {
       setExpertPhoto(file);
       const url = URL.createObjectURL(file);
       setExpertPreview(url);
+    }
+  };
+
+  const handleStyleRefUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setStyleRefPhoto(file);
+      const url = URL.createObjectURL(file);
+      setStyleRefPreview(url);
     }
   };
 
@@ -242,14 +375,22 @@ export default function NanoBananoCarousel() {
     if (!expertPhoto) return setError("Sube la foto del experto.");
     if (!keyword.trim()) return setError("Ingresa la palabra clave del CTA.");
     if (!script.trim()) return setError("Pega el guion del carrusel.");
+    if (style === "libre" && !styleRefPhoto) return setError("El estilo LIBRE requiere una imagen de referencia visual.");
 
     setGenerating(true);
     setTotalToGenerate(numSlides);
     setCurrentSlide(0);
+    cancelRef.current = false;
 
     try {
       addLog("Codificando imagen de referencia en Base64...");
       const base64Image = await fileToBase64(expertPhoto);
+
+      let styleRefBase64 = null;
+      if (style === "libre" && styleRefPhoto) {
+        addLog("Codificando imagen de estilo visual en Base64...");
+        styleRefBase64 = await fileToBase64(styleRefPhoto);
+      }
 
       addLog(`Procesando guion en ${numSlides} segmentos narrativos...`);
       const segments = processScript(script, numSlides, keyword);
@@ -260,11 +401,15 @@ export default function NanoBananoCarousel() {
 
       // Generate slides sequentially to avoid rate limits
       for (let i = 0; i < segments.length; i++) {
+        // Check if user cancelled
+        if (cancelRef.current) break;
+
         setCurrentSlide(i + 1);
         addLog(`Generando Slide ${i + 1}/${numSlides} (${segments[i].role})...`);
 
         try {
-          const imageData = await generateSlide(apiKey, base64Image, segments[i], style, numSlides);
+          const imageData = await generateSlide(apiKey, base64Image, segments[i], style, numSlides, model, styleRefBase64);
+          if (cancelRef.current) break;
           setSlides((prev) => [
             ...prev,
             {
@@ -276,6 +421,7 @@ export default function NanoBananoCarousel() {
           ]);
           addLog(`✓ Slide ${i + 1} generado exitosamente.`);
         } catch (err) {
+          if (cancelRef.current) break;
           addLog(`✗ Error en Slide ${i + 1}: ${err.message}`);
           setSlides((prev) => [
             ...prev,
@@ -284,13 +430,13 @@ export default function NanoBananoCarousel() {
         }
 
         // Small delay between calls to respect rate limits
-        if (i < segments.length - 1) {
+        if (i < segments.length - 1 && !cancelRef.current) {
           addLog("Esperando 2s antes de la siguiente llamada...");
           await new Promise((r) => setTimeout(r, 2000));
         }
       }
 
-      addLog("¡Generación completa!");
+      if (!cancelRef.current) addLog("¡Generación completa!");
     } catch (err) {
       setError(err.message);
       addLog(`ERROR FATAL: ${err.message}`);
@@ -362,13 +508,37 @@ export default function NanoBananoCarousel() {
         >
           {/* API Key */}
           <FieldGroup label="API Key" sublabel="Google AI Studio">
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="AIza..."
-              style={inputStyle}
-            />
+            <div style={{ position: "relative" }}>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => handleApiKeyChange(e.target.value)}
+                placeholder="AIza..."
+                style={inputStyle}
+              />
+              {apiKeySaved && apiKey && (
+                <span style={{
+                  position: "absolute",
+                  right: 10,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  fontSize: 10,
+                  color: "#4ade80",
+                  fontWeight: 600,
+                }}>
+                  ✓ Guardada
+                </span>
+              )}
+            </div>
+          </FieldGroup>
+
+          {/* Model Selector */}
+          <FieldGroup label="Modelo" sublabel="Nano Banano version">
+            <select value={model} onChange={(e) => setModel(e.target.value)} style={inputStyle}>
+              <option value="gemini-2.5-flash-image">🍌 Nano Banana (gemini-2.5-flash-image)</option>
+              <option value="gemini-3.1-flash-image-preview">🍌2 Nano Banana 2 (gemini-3.1-flash-image-preview)</option>
+              <option value="gemini-3-pro-image-preview">🍌 Pro (gemini-3-pro-image-preview)</option>
+            </select>
           </FieldGroup>
 
           {/* Expert Photo Upload */}
@@ -450,6 +620,7 @@ export default function NanoBananoCarousel() {
                     cursor: "pointer",
                     transition: "all 0.2s",
                     textAlign: "left",
+                    gridColumn: key === "libre" ? "1 / -1" : "auto",
                   }}
                 >
                   {label}
@@ -457,6 +628,45 @@ export default function NanoBananoCarousel() {
               ))}
             </div>
           </FieldGroup>
+
+          {/* Style Reference Upload — only shown when "libre" is selected */}
+          {style === "libre" && (
+            <FieldGroup label="Referencia Visual" sublabel="Subí una imagen con el estilo que querés replicar">
+              <div
+                onClick={() => styleRefInputRef.current?.click()}
+                style={{
+                  border: "2px dashed rgba(236, 72, 153, 0.3)",
+                  borderRadius: 12,
+                  padding: styleRefPreview ? 0 : 16,
+                  textAlign: "center",
+                  cursor: "pointer",
+                  overflow: "hidden",
+                  transition: "border-color 0.2s",
+                  background: "rgba(236, 72, 153, 0.05)",
+                }}
+              >
+                {styleRefPreview ? (
+                  <img
+                    src={styleRefPreview}
+                    alt="Style ref"
+                    style={{ width: "100%", maxHeight: 140, objectFit: "cover", display: "block" }}
+                  />
+                ) : (
+                  <>
+                    <div style={{ fontSize: 24, marginBottom: 4 }}>🎨</div>
+                    <div style={{ fontSize: 12, color: "#71717a" }}>Click para subir estilo visual</div>
+                  </>
+                )}
+                <input
+                  ref={styleRefInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleStyleRefUpload}
+                  style={{ display: "none" }}
+                />
+              </div>
+            </FieldGroup>
+          )}
 
           {/* Script */}
           <FieldGroup label="Guion del Carrusel" sublabel="El texto completo a distribuir en los slides">
@@ -469,29 +679,81 @@ export default function NanoBananoCarousel() {
             />
           </FieldGroup>
 
-          {/* Generate Button */}
-          <button
-            onClick={handleGenerate}
-            disabled={generating}
-            style={{
-              width: "100%",
-              padding: "14px 20px",
-              borderRadius: 12,
-              border: "none",
-              background: generating
-                ? "rgba(139, 92, 246, 0.3)"
-                : "linear-gradient(135deg, #8b5cf6, #7c3aed)",
-              color: "#fff",
-              fontSize: 14,
-              fontWeight: 700,
-              cursor: generating ? "not-allowed" : "pointer",
-              letterSpacing: "0.02em",
-              transition: "all 0.2s",
-              boxShadow: generating ? "none" : "0 4px 20px rgba(139, 92, 246, 0.3)",
-            }}
-          >
-            {generating ? `Generando Slide ${currentSlide}/${totalToGenerate}...` : "🍌 Generar Carrusel Maestro"}
-          </button>
+          {/* Cost Estimator */}
+          {(() => {
+            const pricing = {
+              "gemini-2.5-flash-image": { perImage: 0.039, label: "Nano Banana" },
+              "gemini-3.1-flash-image-preview": { perImage: 0.067, label: "Nano Banana 2" },
+              "gemini-3-pro-image-preview": { perImage: 0.134, label: "Nano Banana Pro" },
+            };
+            const p = pricing[model] || pricing["gemini-2.5-flash-image"];
+            const total = (p.perImage * numSlides).toFixed(2);
+            const perImg = p.perImage.toFixed(3);
+            return (
+              <div
+                style={{
+                  background: "rgba(139, 92, 246, 0.06)",
+                  border: "1px solid rgba(139, 92, 246, 0.15)",
+                  borderRadius: 8,
+                  padding: "8px 12px",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
+                <span style={{ fontSize: 11, color: "#a1a1aa" }}>
+                  {p.label} · {numSlides} slides · ${perImg}/img
+                </span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: "#c4b5fd" }}>
+                  ~${total}
+                </span>
+              </div>
+            );
+          })()}
+
+          {/* Generate + Cancel Buttons */}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={generating ? handleCancel : handleGenerate}
+              style={{
+                flex: 1,
+                padding: "14px 20px",
+                borderRadius: 12,
+                border: "none",
+                background: generating
+                  ? "rgba(139, 92, 246, 0.3)"
+                  : "linear-gradient(135deg, #8b5cf6, #7c3aed)",
+                color: "#fff",
+                fontSize: 14,
+                fontWeight: 700,
+                cursor: "pointer",
+                letterSpacing: "0.02em",
+                transition: "all 0.2s",
+                boxShadow: generating ? "none" : "0 4px 20px rgba(139, 92, 246, 0.3)",
+              }}
+            >
+              {generating ? `Generando Slide ${currentSlide}/${totalToGenerate}...` : "🍌 Generar Carrusel Maestro"}
+            </button>
+            {generating && (
+              <button
+                onClick={handleCancel}
+                style={{
+                  padding: "14px 16px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(239, 68, 68, 0.4)",
+                  background: "rgba(239, 68, 68, 0.15)",
+                  color: "#f87171",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  transition: "all 0.2s",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                ✕ Cancelar
+              </button>
+            )}
+          </div>
 
           {/* Error */}
           {error && (
@@ -550,12 +812,12 @@ export default function NanoBananoCarousel() {
                 </div>
               )}
 
-              {/* Slides Grid */}
+              {/* Slides Grid — compact layout, 3 per row */}
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(280, 1fr))",
-                  gap: 20,
+                  gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
+                  gap: 12,
                 }}
               >
                 {slides.map((slide, i) => (
@@ -569,28 +831,28 @@ export default function NanoBananoCarousel() {
                       key={`placeholder-${i}`}
                       style={{
                         aspectRatio: "1",
-                        borderRadius: 12,
+                        borderRadius: 8,
                         border: "1px dashed rgba(139, 92, 246, 0.2)",
                         background: "rgba(139, 92, 246, 0.03)",
                         display: "flex",
                         flexDirection: "column",
                         alignItems: "center",
                         justifyContent: "center",
-                        gap: 12,
+                        gap: 8,
                       }}
                     >
                       <div
                         style={{
-                          width: 28,
-                          height: 28,
-                          border: "3px solid rgba(139, 92, 246, 0.15)",
+                          width: 20,
+                          height: 20,
+                          border: "2px solid rgba(139, 92, 246, 0.15)",
                           borderTopColor: "#8b5cf6",
                           borderRadius: "50%",
                           animation: "spin 1s linear infinite",
                         }}
                       />
-                      <span style={{ fontSize: 12, color: "#52525b" }}>
-                        Slide {slides.length + i + 1}
+                      <span style={{ fontSize: 10, color: "#52525b" }}>
+                        S{slides.length + i + 1}
                       </span>
                     </div>
                   ))}
@@ -631,17 +893,17 @@ function SlideCard({ slide }) {
   return (
     <div
       style={{
-        borderRadius: 12,
+        borderRadius: 8,
         overflow: "hidden",
         border: "1px solid rgba(139, 92, 246, 0.15)",
         background: "rgba(255,255,255,0.02)",
         animation: "fadeIn 0.4s ease",
       }}
     >
-      {/* Slide header */}
+      {/* Slide header — compact */}
       <div
         style={{
-          padding: "8px 12px",
+          padding: "4px 8px",
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
@@ -649,13 +911,13 @@ function SlideCard({ slide }) {
           borderBottom: "1px solid rgba(139, 92, 246, 0.1)",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span
             style={{
-              fontSize: 10,
+              fontSize: 9,
               fontWeight: 700,
-              padding: "2px 8px",
-              borderRadius: 4,
+              padding: "1px 6px",
+              borderRadius: 3,
               background:
                 slide.role === "HOOK"
                   ? "rgba(234, 179, 8, 0.2)"
@@ -677,7 +939,7 @@ function SlideCard({ slide }) {
           >
             {slide.role}
           </span>
-          <span style={{ fontSize: 12, color: "#71717a" }}>Slide {slide.index + 1}</span>
+          <span style={{ fontSize: 10, color: "#71717a" }}>S{slide.index + 1}</span>
         </div>
         {slide.imageData && (
           <button
@@ -685,14 +947,14 @@ function SlideCard({ slide }) {
             style={{
               background: "none",
               border: "1px solid rgba(139, 92, 246, 0.3)",
-              borderRadius: 6,
-              padding: "4px 10px",
-              fontSize: 11,
+              borderRadius: 4,
+              padding: "2px 6px",
+              fontSize: 9,
               color: "#8b5cf6",
               cursor: "pointer",
             }}
           >
-            ↓ Descargar
+            ↓
           </button>
         )}
       </div>
@@ -707,31 +969,31 @@ function SlideCard({ slide }) {
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            padding: 20,
+            padding: 12,
             textAlign: "center",
           }}
         >
           <div>
-            <div style={{ fontSize: 28, marginBottom: 8 }}>⚠️</div>
-            <div style={{ fontSize: 12, color: "#f87171", lineHeight: 1.5 }}>{slide.error}</div>
+            <div style={{ fontSize: 20, marginBottom: 4 }}>⚠️</div>
+            <div style={{ fontSize: 10, color: "#f87171", lineHeight: 1.4 }}>{slide.error}</div>
           </div>
         </div>
       ) : null}
 
-      {/* Text preview */}
+      {/* Text preview — compact */}
       <div
         style={{
-          padding: "8px 12px",
-          fontSize: 11,
+          padding: "4px 8px",
+          fontSize: 9,
           color: "#71717a",
           borderTop: "1px solid rgba(255,255,255,0.04)",
-          lineHeight: 1.4,
-          maxHeight: 60,
+          lineHeight: 1.3,
+          maxHeight: 36,
           overflow: "hidden",
         }}
       >
-        {slide.text?.substring(0, 120)}
-        {slide.text?.length > 120 ? "..." : ""}
+        {slide.text?.substring(0, 80)}
+        {slide.text?.length > 80 ? "..." : ""}
       </div>
     </div>
   );
