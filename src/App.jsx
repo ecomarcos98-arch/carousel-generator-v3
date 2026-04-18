@@ -1,1076 +1,769 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback } from "react";
 
-// ============================================================
-// NANO BANANO CAROUSEL GENERATOR
-// Full-stack Instagram carousel generator using Gemini 2.5 Flash
-// ============================================================
+const IMAGE_MODEL = "gemini-3.1-flash-image-preview";
+const DEFAULT_API_KEY = "";
 
-// --- UTILITY: Convert file to base64 ---
-const fileToBase64 = (file) =>
-  new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result.split(",")[1]);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
+const IMAGE_STYLES = [
+  {
+    id: "gta",
+    name: "🎮 GTA",
+    prompt: "Grand Theft Auto V loading screen art style, saturated colors, stylized realism, sharp outlines, dramatic poses, urban gritty atmosphere, GTA game aesthetic",
+    expertPrompt: "in GTA V loading screen art style with sharp outlines and saturated colors, preserving exact facial features and likeness of this person",
+  },
+  {
+    id: "comic",
+    name: "💥 Comic Book",
+    prompt: "comic book art style, bold ink outlines, halftone dots, dramatic shading, vibrant panel colors, action comic aesthetic",
+    expertPrompt: "as a comic book character with bold ink outlines and halftone shading, preserving facial features and likeness of this person",
+  },
+  {
+    id: "before_after",
+    name: "🔄 Antes/Después",
+    prompt: "digital illustration, vibrant colors, stylized animation style. Image divided in two horizontal panels (top and bottom). Top panel has desaturated cold tones, gloomy atmosphere. Bottom panel has vibrant warm tones, successful positive atmosphere. Clear thin dividing line between panels. High quality digital art, bold colors",
+    expertPrompt: "The same person from the reference photo must appear in BOTH panels as a stylized animated illustration character, preserving their facial features. Top panel shows them in a negative situation, bottom panel shows them thriving",
+  },
+  {
+    id: "caricature",
+    name: "🎨 Caricatura",
+    prompt: "caricature illustration style, exaggerated proportions and facial features, humorous, expressive, colorful, editorial cartoon aesthetic with bold lines",
+    expertPrompt: "as a caricature with exaggerated but recognizable facial features of this person, humorous proportions, bold colorful illustration",
+  },
+  {
+    id: "libre",
+    name: "🖼️ Libre",
+    prompt: "",
+    expertPrompt: "",
+    isLibre: true,
+  },
+];
 
-// --- UTILITY: Download a single image ---
-const downloadImage = (dataUrl, filename) => {
-  const link = document.createElement("a");
-  link.href = dataUrl;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-};
+// ─── API ─────────────────────────────────────────────────────────────
 
-// --- UTILITY: Download all as ZIP using JSZip from CDN ---
-const downloadAllAsZip = async (slides) => {
-  const script = document.createElement("script");
-  script.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
-  document.head.appendChild(script);
-  await new Promise((r) => (script.onload = r));
-  const zip = new window.JSZip();
-  slides.forEach((s, i) => {
-    const base64 = s.imageData.split(",")[1] || s.imageData;
-    zip.file(`slide_${i + 1}.png`, base64, { base64: true });
-  });
-  const blob = await zip.generateAsync({ type: "blob" });
-  const url = URL.createObjectURL(blob);
-  downloadImage(url, "carousel_nano_banano.zip");
-  URL.revokeObjectURL(url);
-};
-
-// --- TEXT SANITIZER: Strips markdown, special chars, and formatting artifacts ---
-const sanitizeText = (raw) => {
-  return raw
-    .replace(/\*\*|__/g, "")           // Remove bold markdown
-    .replace(/\*|_/g, "")              // Remove italic markdown
-    .replace(/^[-–—•]\s*/gm, "")       // Remove bullet dashes
-    .replace(/^#{1,6}\s*/gm, "")       // Remove markdown headers
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // [link text](url) → link text
-    .replace(/`/g, "")                 // Remove backticks
-    .replace(/\n{3,}/g, "\n\n")        // Collapse excessive newlines
-    .trim();
-};
-
-// --- REGEX EXTRACTOR: Pulls Texto: and Escena: fields if present ---
-const extractFields = (block) => {
-  const textoMatch = block.match(/(?:texto|text)\s*:\s*(.+?)(?=(?:escena|scene|contexto|context|estilo|style)\s*:|$)/is);
-  const escenaMatch = block.match(/(?:escena|scene)\s*:\s*(.+?)(?=(?:texto|text|contexto|context|estilo|style)\s*:|$)/is);
-
-  if (textoMatch) {
-    // Structured format detected — extract only tagged fields
-    return {
-      displayText: sanitizeText(textoMatch[1].trim()),
-      sceneOverride: escenaMatch ? sanitizeText(escenaMatch[1].trim()) : null,
-    };
-  }
-
-  // No structured tags — treat the whole block as display text
-  return {
-    displayText: sanitizeText(block.trim()),
-    sceneOverride: null,
-  };
-};
-
-// --- SCRIPT PROCESSOR: Splits the script into narrative segments ---
-const processScript = (rawScript, numSlides, keyword) => {
-  // Split by double newlines, numbered lines, or "Slide" markers
-  const lines = rawScript
-    .split(/\n{2,}|(?=^(?:slide|diapositiva|\d+[\.\)\-])\s)/im)
-    .map((l) => l.trim())
-    .filter(Boolean);
-
-  const segments = [];
-
-  if (lines.length >= numSlides) {
-    for (let i = 0; i < numSlides; i++) {
-      segments.push(lines[i]);
-    }
-  } else {
-    const words = sanitizeText(rawScript).split(/\s+/);
-    const perSlide = Math.ceil(words.length / numSlides);
-    for (let i = 0; i < numSlides; i++) {
-      segments.push(words.slice(i * perSlide, (i + 1) * perSlide).join(" "));
+async function geminiImage(prompt, refImages, apiKey) {
+  if (!apiKey) throw new Error("Ingresá tu API Key de Gemini");
+  const parts = [];
+  if (refImages && refImages.length > 0) {
+    for (const ref of refImages) {
+      if (ref.base64) {
+        parts.push({ inlineData: { mimeType: ref.mimeType || "image/jpeg", data: ref.base64 } });
+      }
     }
   }
-
-  // Tag each segment with its narrative role + extract clean text
-  return segments.map((rawBlock, i) => {
-    const { displayText, sceneOverride } = extractFields(rawBlock);
-    let role, placement, sceneHint;
-
-    if (i === 0) {
-      role = "HOOK";
-      placement = "CENTER";
-      sceneHint = "The character is looking directly at the viewer with an intense, provocative expression — raised eyebrow, slight smirk, confrontational energy. Dramatic close-up, dynamic angle from slightly below.";
-    } else if (i === numSlides - 1) {
-      role = "CTA";
-      placement = "CENTER";
-      sceneHint = "The character is pointing directly at the viewer with a big confident smile, inviting and energetic body language. Open posture, bright and vibrant background with high energy.";
-    } else if (i <= Math.floor(numSlides / 2)) {
-      role = "PROBLEM";
-      placement = "BOTTOM";
-      sceneHint = "The character has a frustrated, disappointed, or concerned facial expression — furrowed brow, maybe arms crossed or palm on forehead. Moody atmospheric lighting, darker tones.";
-    } else {
-      role = "SOLUTION";
-      placement = "TOP";
-      sceneHint = "The character is smiling confidently with an 'I've got the answer' expression — finger raised making a point, or gesturing with conviction. Bright uplifting lighting, optimistic atmosphere.";
-    }
-
-    // Use scene override from structured input if available
-    if (sceneOverride) sceneHint = sceneOverride;
-
-    // Append CTA keyword if missing on last slide
-    let finalText = displayText;
-    if (role === "CTA" && !finalText.includes(keyword)) {
-      finalText = `${finalText}\n\nComenta "${keyword}"`;
-    }
-
-    return { index: i, role, text: finalText, placement, sceneHint };
-  });
-};
-
-// --- STYLE PRESETS ---
-const STYLES = {
-  gta: {
-    label: "GTA V / Novela Gráfica",
-    prompt: "Grand Theft Auto V loading screen art style. Hard cel-shading shadows, thick black ink outlines, high contrast, saturated colors, dramatic angles. The character should look like a stylized GTA V cover illustration with bold graphic novel aesthetics.",
-    typography: "Use Impact or a bold condensed sans-serif font. ALL CAPS. The text must be WHITE with a thick BLACK outline/stroke around each letter (like meme/YouTube thumbnail style). Do NOT use the GTA stylized cursive font. Use plain, heavy, condensed Impact-style typography for maximum readability.",
-  },
-  pixar: {
-    label: "Pixar / Disney 3D",
-    prompt: "Pixar and Disney 3D animated movie style. Smooth digital rendering, slightly exaggerated proportions, big expressive eyes, warm magical lighting with soft ambient glow, subsurface scattering on skin. The character should look like a Pixar movie protagonist — charming, polished, and cinematic.",
-    typography: "Use a friendly, rounded bold sans-serif font. White or bright colored text with a soft drop shadow for depth and legibility.",
-  },
-  retro: {
-    label: "Retro Comic 1950s",
-    prompt: "Classic 1950s-1960s Marvel/DC comic book style. Visible halftone printing dots (Ben-Day dots), limited vintage color palette (muted reds, yellows, blues), thick black ink outlines, hand-drawn crosshatching, aged paper texture. The character should look like a Golden Age comic book hero illustration.",
-    typography: "Use bold comic book caption box typography. Yellow or white text on a rectangular colored caption box, with thick black outlines on the letters, classic comic book style.",
-  },
-  caricatura: {
-    label: "Caricatura",
-    prompt: "Exaggerated caricature illustration style. Oversized head with emphasized facial features, expressive cartoon proportions, bold outlines, vibrant flat colors, humorous and dynamic poses. The character should be a recognizable but playfully exaggerated caricature version of the reference person.",
-    typography: "Use bold, playful hand-drawn style lettering. Bright colored text with dark outlines, slightly uneven for a fun cartoon feel.",
-  },
-  libre: {
-    label: "🎨 Libre (Subí tu estilo)",
-    prompt: "CUSTOM_STYLE",
-    typography: "Use Impact or a bold condensed sans-serif font. ALL CAPS. The text must be WHITE with a thick BLACK outline/stroke around each letter for maximum readability.",
-  },
-};
-
-// ============================================================
-// BUILD THE PROMPT FOR EACH SLIDE (NANO BANANO / GEMINI FLASH)
-// ARCHITECTURE:
-// - The reference photo is used as a MODEL to redraw the person
-//   in the selected artistic style (NOT pasted as-is).
-// - Scene/style instructions are BACKGROUND context only.
-// - RENDER_TEXT is the ONLY text that appears on the image.
-// ============================================================
-const buildSlidePrompt = (segment, style, totalSlides) => {
-  const styleData = STYLES[style] || STYLES.gta;
-  const typographyPrompt = styleData.typography;
-
-  // For "libre" style, the visual style comes from the uploaded reference image
-  const isLibre = style === "libre";
-  const styleInstruction = isLibre
-    ? "Match the EXACT artistic style, color palette, rendering technique, and visual mood shown in the SECOND reference image (the style reference). Replicate that style precisely for the entire slide."
-    : styleData.prompt;
-
-  const cleanText = segment.text
-    .replace(/[\r\n]+/g, " ")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-
-  return `Generate a 1080x1080 square Instagram carousel slide image.
-
-[CHARACTER DESIGN — USE FIRST REFERENCE IMAGE AS FACE MODEL ONLY]
-Study the FIRST reference image (the person's photo) carefully: note their face shape, hairstyle, hair color, skin tone, facial hair, and distinguishing features.
-Now REDRAW this person entirely from scratch in the following artistic style: ${styleInstruction}
-Do NOT paste, overlay, collage, or photoshop the reference photo into the image. The person must be fully illustrated/rendered in the artistic style — as if an artist drew them from the reference.
-The character must be RECOGNIZABLE as the same person but rendered 100% in the chosen art style.
-
-[CHARACTER EXPRESSION & POSE — DO NOT RENDER AS TEXT]
-${segment.sceneHint}
-
-[VISUAL COMPOSITION — DO NOT RENDER AS TEXT]
-${isLibre ? "Replicate the exact style from the second reference image for backgrounds, lighting, colors, and overall composition." : `Scene style: ${styleInstruction}`}
-The entire image (background, character, typography) must be cohesive in the same artistic style.
-
-[TEXT RENDERING — THIS IS THE ONLY TEXT THAT GOES ON THE IMAGE]
-RENDER_TEXT: "${cleanText}"
-Place this text at the ${segment.placement} of the image.
-TYPOGRAPHY STYLE: ${typographyPrompt}
-
-STRICT RULES:
-- The character must be DRAWN/ILLUSTRATED in the art style, NOT a real photo.
-- ONLY render the exact text inside the RENDER_TEXT quotes on the image.
-- Do NOT render any words from the instructions, labels, or section headers.
-- Do NOT add slide numbers, counters, or pagination like "1/5".
-- The character's facial expression must match the mood of the text.
-- Text must be large enough to read on a phone screen.
-- The result must look like a premium illustrated Instagram carousel slide.`;
-};
-
-// ============================================================
-// API CALLER: Sends request to Gemini 2.5 Flash (Nano Banano)
-// - First image: expert face reference (for identity)
-// - Second image (libre only): style visual reference
-// ============================================================
-const generateSlide = async (apiKey, referenceImageBase64, segment, style, totalSlides, model, styleRefBase64) => {
-  const prompt = buildSlidePrompt(segment, style, totalSlides);
-
-  // Build parts array: expert photo first, then prompt, then optional style ref
-  const parts = [
-    {
-      inlineData: {
-        mimeType: "image/jpeg",
-        data: referenceImageBase64,
-      },
-    },
-  ];
-
-  // For "libre" style, add the style reference as a second image
-  if (style === "libre" && styleRefBase64) {
-    parts.push({
-      inlineData: {
-        mimeType: "image/jpeg",
-        data: styleRefBase64,
-      },
-    });
-  }
-
   parts.push({ text: prompt });
-
-  const requestBody = {
-    contents: [{ parts }],
-    generationConfig: {
-      responseModalities: ["TEXT", "IMAGE"],
-    },
-  };
-
-  // Use the selected model for the API call
-  const modelId = model || "gemini-2.5-flash-image";
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`,
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${IMAGE_MODEL}:generateContent?key=${apiKey}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify({
+        contents: [{ parts }],
+        generationConfig: {
+          responseModalities: ["TEXT", "IMAGE"],
+        },
+      }),
     }
   );
+  const data = await res.json();
+  if (data.error) throw new Error(`API Error: ${data.error.message} (${data.error.code || ""})`);
+  if (!data.candidates || !data.candidates[0]) {
+    throw new Error("No candidates in response: " + JSON.stringify(data).substring(0, 200));
+  }
+  const resParts = data.candidates[0]?.content?.parts || [];
+  const ip = resParts.find((p) => p.inlineData);
+  if (!ip) {
+    const textParts = resParts.filter(p => p.text).map(p => p.text).join(" ");
+    throw new Error("No image in response. Model said: " + (textParts || "nothing").substring(0, 150));
+  }
+  return ip.inlineData.data;
+}
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`API Error (${response.status}): ${err}`);
+function fileToBase64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(",")[1]);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+}
+
+function parseSlides(raw) {
+  const blocks = raw.split("---").map((b) => b.trim()).filter(Boolean);
+  return blocks.map((block) => {
+    const escenaMatch = block.match(/ESCENA:\s*([\s\S]*?)(?=TEXTO:|$)/i);
+    const textoMatch = block.match(/TEXTO:\s*([\s\S]*)/i);
+    return {
+      scene: escenaMatch ? escenaMatch[1].trim() : block,
+      text: textoMatch ? textoMatch[1].trim() : "",
+    };
+  });
+}
+
+// ─── Canvas ──────────────────────────────────────────────────────────
+
+function loadImg(src) {
+  return new Promise((res, rej) => {
+    const i = new Image();
+    i.crossOrigin = "anonymous";
+    i.onload = () => res(i);
+    i.onerror = rej;
+    i.src = src;
+  });
+}
+
+function wrap(ctx, text, maxW) {
+  const words = text.split(" ");
+  const lines = [];
+  let cur = "";
+  for (const w of words) {
+    const t = cur ? cur + " " + w : w;
+    if (ctx.measureText(t).width > maxW && cur) {
+      lines.push(cur);
+      cur = w;
+    } else cur = t;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+async function renderSlide(canvas, bgB64, textContent, slideIdx, totalSlides, keyword, styleId) {
+  const ctx = canvas.getContext("2d");
+  const W = 1080, H = 1080;
+  canvas.width = W;
+  canvas.height = H;
+
+  // Background
+  if (bgB64) {
+    try {
+      const img = await loadImg("data:image/png;base64," + bgB64);
+      const sc = Math.max(W / img.width, H / img.height);
+      ctx.drawImage(img, (W - img.width * sc) / 2, (H - img.height * sc) / 2, img.width * sc, img.height * sc);
+    } catch {
+      ctx.fillStyle = "#0a0a0a";
+      ctx.fillRect(0, 0, W, H);
+    }
+  } else {
+    ctx.fillStyle = "#0a0a0a";
+    ctx.fillRect(0, 0, W, H);
   }
 
-  const data = await response.json();
+  if (!textContent) return canvas.toDataURL("image/png");
 
-  // Extract the generated image from response
-  const candidates = data.candidates || [];
-  for (const candidate of candidates) {
-    const parts = candidate.content?.parts || [];
-    for (const part of parts) {
-      if (part.inlineData) {
-        return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-      }
+  const pad = 50;
+  const maxW = W - pad * 2 - 20;
+  const isLast = slideIdx === totalSlides - 1;
+
+  // For before/after style, handle split text
+  if (styleId === "before_after" && textContent.includes("\n")) {
+    const parts = textContent.split("\n").filter(Boolean);
+    const topTxt = parts[0] || "";
+    const bottomTxt = parts.slice(1).join(" ");
+    const halfH = H / 2;
+
+    ctx.textAlign = "center";
+    ctx.lineJoin = "round";
+    ctx.miterLimit = 2;
+
+    // Top panel text — bottom of upper half
+    if (topTxt) {
+      // Subtle dark gradient at bottom of top panel
+      const tGrd = ctx.createLinearGradient(0, halfH - 120, 0, halfH);
+      tGrd.addColorStop(0, "rgba(0,0,0,0)");
+      tGrd.addColorStop(1, "rgba(0,0,0,0.55)");
+      ctx.fillStyle = tGrd;
+      ctx.fillRect(0, halfH - 120, W, 120);
+
+      ctx.font = "bold 38px Arial, sans-serif";
+      const tLines = wrap(ctx, topTxt, maxW);
+      const tStartY = halfH - 18 - (tLines.length - 1) * 48;
+      tLines.forEach((l, i) => {
+        const y = tStartY + i * 48;
+        ctx.strokeStyle = "#000000";
+        ctx.lineWidth = 8;
+        ctx.strokeText(l, W / 2, y);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(l, W / 2, y);
+      });
+    }
+
+    // Bottom panel text — bottom of lower half
+    if (bottomTxt) {
+      // Subtle dark gradient at bottom of bottom panel
+      const bGrd = ctx.createLinearGradient(0, H - 120, 0, H);
+      bGrd.addColorStop(0, "rgba(0,0,0,0)");
+      bGrd.addColorStop(1, "rgba(0,0,0,0.55)");
+      ctx.fillStyle = bGrd;
+      ctx.fillRect(0, H - 120, W, 120);
+
+      ctx.font = "bold 38px Arial, sans-serif";
+      const bLines = wrap(ctx, bottomTxt, maxW);
+      const bStartY = H - 18 - (bLines.length - 1) * 48;
+      bLines.forEach((l, i) => {
+        const y = bStartY + i * 48;
+        ctx.strokeStyle = "#000000";
+        ctx.lineWidth = 8;
+        ctx.strokeText(l, W / 2, y);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(l, W / 2, y);
+      });
+    }
+  } else {
+    // Standard text overlay
+    const lines = textContent.split("\n").filter(Boolean);
+    const title = lines[0] || "";
+    const body = lines.slice(1).join(" ");
+
+    // Gradient at bottom
+    ctx.shadowColor = "transparent";
+    const grd = ctx.createLinearGradient(0, H * 0.45, 0, H);
+    grd.addColorStop(0, "rgba(0,0,0,0.0)");
+    grd.addColorStop(0.25, "rgba(0,0,0,0.65)");
+    grd.addColorStop(1, "rgba(0,0,0,0.88)");
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, H * 0.45, W, H * 0.55);
+
+    // Accent
+    ctx.fillStyle = "#d4a853";
+    ctx.fillRect(pad, H * 0.68, 50, 3);
+
+    ctx.shadowColor = "rgba(0,0,0,0.9)";
+    ctx.shadowBlur = 10;
+    ctx.shadowOffsetX = 2;
+    ctx.shadowOffsetY = 2;
+
+    // Title
+    ctx.textAlign = "left";
+    ctx.font = "bold 46px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "#ffffff";
+    const tLines = wrap(ctx, title, maxW);
+    let y = H * 0.71;
+    tLines.forEach((l, i) => ctx.fillText(l, pad + 4, y + i * 56));
+    y += tLines.length * 56 + 10;
+
+    // Body
+    if (body) {
+      ctx.font = "30px 'Segoe UI', sans-serif";
+      ctx.fillStyle = "rgba(255,255,255,0.85)";
+      const bLines = wrap(ctx, body, maxW);
+      bLines.forEach((l, i) => ctx.fillText(l, pad + 4, y + i * 42));
+      y += bLines.length * 42 + 10;
+    }
+
+    // CTA
+    if (isLast && keyword) {
+      y += 8;
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
+      ctx.font = "bold 36px 'Segoe UI', sans-serif";
+      const kw = keyword.toUpperCase();
+      const kwW = ctx.measureText(kw).width + 50;
+      ctx.fillStyle = "#d4a853";
+      ctx.beginPath(); ctx.roundRect(pad + 4, y, kwW, 52, 8); ctx.fill();
+      ctx.fillStyle = "#0a0a0a";
+      ctx.fillText(kw, pad + 29, y + 38);
+      ctx.fillStyle = "rgba(255,255,255,0.55)";
+      ctx.font = "20px 'Segoe UI', sans-serif";
+      ctx.fillText("↑ Comenta esta palabra", pad + 4, y + 78);
     }
   }
 
-  throw new Error("No image returned from Nano Banano. The model may not have generated an image for this prompt.");
-};
+  // Reset shadow
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
 
-// ============================================================
-// MAIN APPLICATION COMPONENT
-// ============================================================
-export default function NanoBananoCarousel() {
-  const [apiKey, setApiKey] = useState("");
-  const [apiKeySaved, setApiKeySaved] = useState(false);
-  const [expertPhoto, setExpertPhoto] = useState(null);
-  const [expertPreview, setExpertPreview] = useState(null);
+  // Counter
+  ctx.textAlign = "right";
+  ctx.fillStyle = "rgba(255,255,255,0.4)";
+  ctx.font = "bold 18px 'Segoe UI', sans-serif";
+  ctx.fillText(`${slideIdx + 1}/${totalSlides}`, W - 24, 28);
+
+  return canvas.toDataURL("image/png");
+}
+
+// ─── ZIP (with CRC32 for macOS compatibility) ───────────────────────
+
+function crc32(data) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < data.length; i++) {
+    crc ^= data[i];
+    for (let j = 0; j < 8; j++) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+    }
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function createZip(files) {
+  const localFiles = [], centralDir = [];
+  let offset = 0;
+  for (const file of files) {
+    const name = new TextEncoder().encode(file.name);
+    const data = file.data;
+    const crc = crc32(data);
+
+    // Local file header
+    const local = new Uint8Array(30 + name.length + data.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0, true);
+    lv.setUint16(8, 0, true);   // no compression
+    lv.setUint16(10, 0, true);
+    lv.setUint16(12, 0, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, data.length, true);
+    lv.setUint32(22, data.length, true);
+    lv.setUint16(26, name.length, true);
+    lv.setUint16(28, 0, true);
+    local.set(name, 30);
+    local.set(data, 30 + name.length);
+    localFiles.push(local);
+
+    // Central directory entry
+    const cen = new Uint8Array(46 + name.length);
+    const cv = new DataView(cen.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, 0, true);
+    cv.setUint16(14, 0, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, data.length, true);
+    cv.setUint32(24, data.length, true);
+    cv.setUint16(28, name.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true);
+    cen.set(name, 46);
+    centralDir.push(cen);
+    offset += local.length;
+  }
+
+  const cdSize = centralDir.reduce((s, c) => s + c.length, 0);
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, files.length, true);
+  ev.setUint16(10, files.length, true);
+  ev.setUint32(12, cdSize, true);
+  ev.setUint32(16, offset, true);
+  ev.setUint16(20, 0, true);
+
+  const zip = new Uint8Array(offset + cdSize + 22);
+  let pos = 0;
+  for (const l of localFiles) { zip.set(l, pos); pos += l.length; }
+  for (const c of centralDir) { zip.set(c, pos); pos += c.length; }
+  zip.set(eocd, pos);
+  return zip;
+}
+
+function b64u8(b) { const n=atob(b),a=new Uint8Array(n.length);for(let i=0;i<n.length;i++)a[i]=n.charCodeAt(i);return a; }
+
+// ─── Styles ──────────────────────────────────────────────────────────
+
+const lbl = { display:"block", marginBottom:8, fontSize:13, color:"#a89870", textTransform:"uppercase", letterSpacing:2 };
+const inp = { width:"100%", padding:"12px 14px", background:"rgba(255,255,255,0.04)", border:"1px solid rgba(212,168,83,0.2)", borderRadius:8, color:"#e8e0d0", fontSize:15, fontFamily:"inherit", outline:"none", boxSizing:"border-box" };
+
+// ─── App ─────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [apiKey, setApiKey] = useState(DEFAULT_API_KEY);
+  const [showKey, setShowKey] = useState(false);
+  const [slideText, setSlideText] = useState("");
   const [keyword, setKeyword] = useState("");
-  const [numSlides, setNumSlides] = useState(5);
-  const [script, setScript] = useState("");
-  const [style, setStyle] = useState("gta");
-  const [styleRefPhoto, setStyleRefPhoto] = useState(null);
-  const [styleRefPreview, setStyleRefPreview] = useState(null);
-  const [model, setModel] = useState("gemini-2.5-flash-image");
-  const [slides, setSlides] = useState([]);
+  const [selectedStyle, setSelectedStyle] = useState("gta");
+  const [expertPhotos, setExpertPhotos] = useState([]); // array of {base64, mimeType, preview}
+  const [status, setStatus] = useState("");
+  const [progress, setProgress] = useState(0);
+  const [totalSteps, setTotalSteps] = useState(0);
+  const [images, setImages] = useState([]);
+  const [idx, setIdx] = useState(0);
   const [generating, setGenerating] = useState(false);
-  const [currentSlide, setCurrentSlide] = useState(0);
-  const [totalToGenerate, setTotalToGenerate] = useState(0);
-  const [error, setError] = useState("");
-  const [log, setLog] = useState([]);
-  const fileInputRef = useRef(null);
-  const styleRefInputRef = useRef(null);
-  const cancelRef = useRef(false);
+  const [libreRef, setLibreRef] = useState(null);
+  const [tooltipVisible, setTooltipVisible] = useState(false);
+  const canvasRef = useRef(null);
+  const fileRef = useRef(null);
+  const libreFileRef = useRef(null);
 
-  // Load saved API key from persistent storage on mount
-  useEffect(() => {
-    (async () => {
-      try {
-        const result = await window.storage.get("nano-banano-api-key");
-        if (result && result.value) {
-          setApiKey(result.value);
-          setApiKeySaved(true);
-        }
-      } catch (e) {
-        // No saved key, that's fine
-      }
-    })();
+  const style = IMAGE_STYLES.find((s) => s.id === selectedStyle);
+  const parsed = parseSlides(slideText);
+  const count = parsed.length;
+  const hasExpert = expertPhotos.length > 0;
+
+  const handleUpload = useCallback(async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    const newPhotos = [];
+    for (const f of files) {
+      if (expertPhotos.length + newPhotos.length >= 4) break;
+      newPhotos.push({ base64: await fileToBase64(f), mimeType: f.type, preview: URL.createObjectURL(f) });
+    }
+    setExpertPhotos(prev => [...prev, ...newPhotos].slice(0, 4));
+    if (fileRef.current) fileRef.current.value = "";
+  }, [expertPhotos]);
+
+  const removeExpertPhoto = useCallback((index) => {
+    setExpertPhotos(prev => prev.filter((_, i) => i !== index));
   }, []);
 
-  // Save API key to persistent storage when it changes
-  const handleApiKeyChange = async (newKey) => {
-    setApiKey(newKey);
-    setApiKeySaved(false);
-    if (newKey.trim()) {
-      try {
-        await window.storage.set("nano-banano-api-key", newKey.trim());
-        setApiKeySaved(true);
-      } catch (e) {
-        // Storage not available, key works for this session only
-      }
-    }
-  };
+  const buildImagePrompt = useCallback((sceneDesc, styleObj, hasExpert) => {
+    const expertStrong = "The character MUST be the EXACT person shown in the reference photos. Copy their precise face shape, jawline, nose, eyes, eyebrows, hair style, hair color, facial hair, skin tone, and body build. The person in the output MUST be immediately recognizable as the person in the reference photos. Do NOT change their appearance. Multiple reference photos are provided for accuracy — use ALL of them.";
 
-  const addLog = useCallback((msg) => {
-    setLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
+    if (styleObj.isLibre) {
+      const base = `Generate an image based on this scene: "${sceneDesc}". Match the visual style of the style reference image exactly (color palette, illustration technique, composition style).`;
+      const expertPart = hasExpert ? ` ${expertStrong}` : "";
+      return `${base}${expertPart} Square format 1:1. Do NOT include any text, words, letters, numbers, or captions in the image.`;
+    }
+    if (hasExpert) {
+      return `Generate an image based on this scene: "${sceneDesc}". ${expertStrong} ${styleObj.expertPrompt}. Place them naturally in the scene. ${styleObj.prompt}. Square format 1:1. Do NOT include any text, words, letters, numbers, or captions in the image.`;
+    }
+    return `Generate an image: "${sceneDesc}". ${styleObj.prompt}. Include a professional-looking person as the main subject if the scene implies one. Square format 1:1. Do NOT include any text, words, letters, numbers, or captions in the image.`;
   }, []);
 
-  const handleCancel = () => {
-    cancelRef.current = true;
-    setGenerating(false);
-    setLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ⛔ Generación cancelada por el usuario.`]);
-  };
-
-  const handlePhotoUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setExpertPhoto(file);
-      const url = URL.createObjectURL(file);
-      setExpertPreview(url);
-    }
-  };
-
-  const handleStyleRefUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setStyleRefPhoto(file);
-      const url = URL.createObjectURL(file);
-      setStyleRefPreview(url);
-    }
-  };
-
-  const handleGenerate = async () => {
-    setError("");
-    setLog([]);
-    setSlides([]);
-
-    // Validation
-    if (!apiKey.trim()) return setError("Ingresa tu API Key de Google AI Studio.");
-    if (!expertPhoto) return setError("Sube la foto del experto.");
-    if (!keyword.trim()) return setError("Ingresa la palabra clave del CTA.");
-    if (!script.trim()) return setError("Pega el guion del carrusel.");
-    if (style === "libre" && !styleRefPhoto) return setError("El estilo LIBRE requiere una imagen de referencia visual.");
-
-    setGenerating(true);
-    setTotalToGenerate(numSlides);
-    setCurrentSlide(0);
-    cancelRef.current = false;
+  const generate = useCallback(async () => {
+    if (count < 2) return;
+    setGenerating(true); setImages([]); setIdx(0);
+    setTotalSteps(count); setProgress(0);
+    const canvas = canvasRef.current || document.createElement("canvas");
+    canvasRef.current = canvas;
+    const results = [];
 
     try {
-      addLog("Codificando imagen de referencia en Base64...");
-      const base64Image = await fileToBase64(expertPhoto);
+      for (let i = 0; i < parsed.length; i++) {
+        const { scene, text } = parsed[i];
+        setStatus(`Generando imagen ${i + 1} de ${count}...`);
+        setProgress(i);
 
-      let styleRefBase64 = null;
-      if (style === "libre" && styleRefPhoto) {
-        addLog("Codificando imagen de estilo visual en Base64...");
-        styleRefBase64 = await fileToBase64(styleRefPhoto);
-      }
-
-      addLog(`Procesando guion en ${numSlides} segmentos narrativos...`);
-      const segments = processScript(script, numSlides, keyword);
-
-      segments.forEach((seg, i) => {
-        addLog(`  Slide ${i + 1}: [${seg.role}] "${seg.text.substring(0, 50)}..."`);
-      });
-
-      // Generate slides sequentially to avoid rate limits
-      for (let i = 0; i < segments.length; i++) {
-        // Check if user cancelled
-        if (cancelRef.current) break;
-
-        setCurrentSlide(i + 1);
-        addLog(`Generando Slide ${i + 1}/${numSlides} (${segments[i].role})...`);
-
+        let bgB64 = null;
+        const scenePrompt = scene || "professional sales leader in a modern office";
         try {
-          const imageData = await generateSlide(apiKey, base64Image, segments[i], style, numSlides, model, styleRefBase64);
-          if (cancelRef.current) break;
-          setSlides((prev) => [
-            ...prev,
-            {
-              index: i,
-              role: segments[i].role,
-              text: segments[i].text,
-              imageData,
-            },
-          ]);
-          addLog(`✓ Slide ${i + 1} generado exitosamente.`);
+          const prompt = buildImagePrompt(scenePrompt, style, hasExpert);
+          const refImages = [];
+          for (const ep of expertPhotos) refImages.push({ base64: ep.base64, mimeType: ep.mimeType });
+          if (style.isLibre && libreRef) refImages.push({ base64: libreRef.base64, mimeType: libreRef.mimeType });
+          bgB64 = await geminiImage(prompt, refImages, apiKey);
         } catch (err) {
-          if (cancelRef.current) break;
-          addLog(`✗ Error en Slide ${i + 1}: ${err.message}`);
-          setSlides((prev) => [
-            ...prev,
-            { index: i, role: segments[i].role, text: segments[i].text, imageData: null, error: err.message },
-          ]);
+          console.warn(`Slide ${i + 1} image failed:`, err);
+          setStatus(`⚠️ Slide ${i + 1} falló: ${err.message}`);
         }
 
-        // Small delay between calls to respect rate limits
-        if (i < segments.length - 1 && !cancelRef.current) {
-          addLog("Esperando 2s antes de la siguiente llamada...");
-          await new Promise((r) => setTimeout(r, 2000));
-        }
+        const dataUrl = await renderSlide(canvas, bgB64, text, i, count, keyword, selectedStyle);
+        results.push({ dataUrl, bgB64, failed: !bgB64 });
+        setImages([...results]);
       }
-
-      if (!cancelRef.current) addLog("¡Generación completa!");
+      setProgress(count);
+      const fails = results.filter((r) => r.failed).length;
+      setStatus(fails ? `Listo — ${fails} imagen${fails > 1 ? "es" : ""} sin generar` : "¡Carrusel listo!");
     } catch (err) {
-      setError(err.message);
-      addLog(`ERROR FATAL: ${err.message}`);
+      setStatus(`Error: ${err.message}`);
     } finally {
       setGenerating(false);
     }
-  };
+  }, [parsed, count, keyword, style, selectedStyle, expertPhotos, hasExpert, buildImagePrompt, apiKey, libreRef]);
 
-  const completedSlides = slides.filter((s) => s.imageData);
+  const retrySlide = useCallback(async (si) => {
+    if (!parsed[si]) return;
+    setGenerating(true);
+    setStatus(`Reintentando slide ${si + 1}...`);
+    const canvas = canvasRef.current || document.createElement("canvas");
+    const { scene, text } = parsed[si];
+
+    try {
+      const prompt = buildImagePrompt(scene || "professional in office", style, hasExpert);
+      const refImages = [];
+      for (const ep of expertPhotos) refImages.push({ base64: ep.base64, mimeType: ep.mimeType });
+      if (style.isLibre && libreRef) refImages.push({ base64: libreRef.base64, mimeType: libreRef.mimeType });
+      const bgB64 = await geminiImage(prompt, refImages, apiKey);
+      const dataUrl = await renderSlide(canvas, bgB64, text, si, count, keyword, selectedStyle);
+      const u = [...images];
+      u[si] = { dataUrl, bgB64, failed: false };
+      setImages(u);
+      setStatus("¡Slide regenerado!");
+    } catch (err) {
+      setStatus(`Error: ${err.message}`);
+    } finally {
+      setGenerating(false);
+    }
+  }, [parsed, count, keyword, style, selectedStyle, expertPhotos, hasExpert, images, buildImagePrompt, apiKey, libreRef]);
+
+  const downloadZip = useCallback(() => {
+    const f = images.map((img, i) => ({
+      name: `slide_${String(i + 1).padStart(2, "0")}.png`,
+      data: b64u8(img.dataUrl.split(",")[1]),
+    }));
+    const z = createZip(f);
+    const u = URL.createObjectURL(new Blob([z], { type: "application/zip" }));
+    const a = document.createElement("a");
+    a.href = u;
+    a.download = `carrusel_${Date.now()}.zip`;
+    a.click();
+    URL.revokeObjectURL(u);
+  }, [images]);
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "linear-gradient(145deg, #0a0a0f 0%, #12121f 40%, #0d1117 100%)",
-        color: "#e4e4e7",
-        fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
-      }}
-    >
+    <div style={{ minHeight: "100vh", background: "linear-gradient(160deg, #080808 0%, #0d0d15 40%, #0a0812 100%)", color: "#e8e0d0", fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
+
       {/* Header */}
-      <div
-        style={{
-          borderBottom: "1px solid rgba(139, 92, 246, 0.2)",
-          padding: "16px 24px",
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          background: "rgba(139, 92, 246, 0.03)",
-        }}
-      >
-        <div
-          style={{
-            width: 36,
-            height: 36,
-            borderRadius: 10,
-            background: "linear-gradient(135deg, #8b5cf6, #ec4899)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 18,
-            fontWeight: 800,
-          }}
-        >
-          🍌
+      <header style={{ padding: "28px 40px 22px", borderBottom: "1px solid rgba(212,168,83,0.15)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ width: 42, height: 42, background: "linear-gradient(135deg, #d4a853, #8a6d2b)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, fontWeight: "bold", color: "#0a0a0a" }}>C</div>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "#d4a853", letterSpacing: 1 }}>CAROUSEL STUDIO</h1>
+            <p style={{ margin: 0, fontSize: 12, color: "#8a7a5a", letterSpacing: 3, textTransform: "uppercase" }}>Generador de carruseles con IA</p>
+          </div>
         </div>
-        <div>
-          <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, letterSpacing: "-0.02em" }}>
-            Nano Banano <span style={{ color: "#8b5cf6" }}>Carousel Generator</span>
-          </h1>
-          <p style={{ margin: 0, fontSize: 11, color: "#71717a", letterSpacing: "0.05em" }}>
-            GEMINI 2.5 FLASH · IMAGE GENERATION · INSTAGRAM CAROUSELS
-          </p>
-        </div>
-      </div>
+      </header>
 
-      <div style={{ display: "flex", minHeight: "calc(100vh - 69px)" }}>
-        {/* ============ LEFT PANEL: CONFIGURATION ============ */}
-        <div
-          style={{
-            width: 380,
-            minWidth: 380,
-            borderRight: "1px solid rgba(139, 92, 246, 0.15)",
-            padding: 20,
-            overflowY: "auto",
-            display: "flex",
-            flexDirection: "column",
-            gap: 16,
-          }}
-        >
+      <div style={{ display: "flex", minHeight: "calc(100vh - 92px)" }}>
+        {/* LEFT */}
+        <div style={{ width: 440, padding: "28px", borderRight: "1px solid rgba(212,168,83,0.1)", overflowY: "auto", flexShrink: 0 }}>
+
           {/* API Key */}
-          <FieldGroup label="API Key" sublabel="Google AI Studio">
-            <div style={{ position: "relative" }}>
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(e) => handleApiKeyChange(e.target.value)}
-                placeholder="AIza..."
-                style={inputStyle}
-              />
-              {apiKeySaved && apiKey && (
-                <span style={{
-                  position: "absolute",
-                  right: 10,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  fontSize: 10,
-                  color: "#4ade80",
-                  fontWeight: 600,
-                }}>
-                  ✓ Guardada
-                </span>
-              )}
-            </div>
-          </FieldGroup>
-
-          {/* Model Selector */}
-          <FieldGroup label="Modelo" sublabel="Nano Banano version">
-            <select value={model} onChange={(e) => setModel(e.target.value)} style={inputStyle}>
-              <option value="gemini-2.5-flash-image">🍌 Nano Banana (gemini-2.5-flash-image)</option>
-              <option value="gemini-3.1-flash-image-preview">🍌2 Nano Banana 2 (gemini-3.1-flash-image-preview)</option>
-              <option value="gemini-3-pro-image-preview">🍌 Pro (gemini-3-pro-image-preview)</option>
-            </select>
-          </FieldGroup>
-
-          {/* Expert Photo Upload */}
-          <FieldGroup label="Foto del Experto" sublabel="Referencia de identidad para todos los slides">
-            <div
-              onClick={() => fileInputRef.current?.click()}
-              style={{
-                border: "2px dashed rgba(139, 92, 246, 0.3)",
-                borderRadius: 12,
-                padding: expertPreview ? 0 : 24,
-                textAlign: "center",
-                cursor: "pointer",
-                overflow: "hidden",
-                transition: "border-color 0.2s",
-                background: "rgba(139, 92, 246, 0.05)",
-                position: "relative",
-              }}
-            >
-              {expertPreview ? (
-                <img
-                  src={expertPreview}
-                  alt="Expert"
-                  style={{ width: "100%", maxHeight: 200, objectFit: "cover", display: "block" }}
-                />
-              ) : (
-                <>
-                  <div style={{ fontSize: 32, marginBottom: 8 }}>📸</div>
-                  <div style={{ fontSize: 13, color: "#71717a" }}>Click para subir imagen</div>
-                  <div style={{ fontSize: 11, color: "#52525b", marginTop: 4 }}>JPG, PNG • Max 10MB</div>
-                </>
-              )}
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                onChange={handlePhotoUpload}
-                style={{ display: "none" }}
-              />
-            </div>
-          </FieldGroup>
-
-          {/* Keyword + Number of slides row */}
-          <div style={{ display: "flex", gap: 12 }}>
-            <FieldGroup label="Palabra Clave" sublabel="Para el CTA final" style={{ flex: 1 }}>
-              <input
-                type="text"
-                value={keyword}
-                onChange={(e) => setKeyword(e.target.value)}
-                placeholder="Ej: GRATIS"
-                style={inputStyle}
-              />
-            </FieldGroup>
-            <FieldGroup label="Slides" sublabel="Cantidad" style={{ width: 90 }}>
-              <select value={numSlides} onChange={(e) => setNumSlides(Number(e.target.value))} style={inputStyle}>
-                {[3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
-            </FieldGroup>
-          </div>
-
-          {/* Visual Style */}
-          <FieldGroup label="Estilo Visual" sublabel="Estética base de los slides">
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              {Object.entries(STYLES).map(([key, { label }]) => (
-                <button
-                  key={key}
-                  onClick={() => setStyle(key)}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: 8,
-                    border: style === key ? "2px solid #8b5cf6" : "1px solid rgba(255,255,255,0.08)",
-                    background: style === key ? "rgba(139, 92, 246, 0.15)" : "rgba(255,255,255,0.03)",
-                    color: style === key ? "#c4b5fd" : "#a1a1aa",
-                    fontSize: 12,
-                    fontWeight: style === key ? 600 : 400,
-                    cursor: "pointer",
-                    transition: "all 0.2s",
-                    textAlign: "left",
-                    gridColumn: key === "libre" ? "1 / -1" : "auto",
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </FieldGroup>
-
-          {/* Style Reference Upload — only shown when "libre" is selected */}
-          {style === "libre" && (
-            <FieldGroup label="Referencia Visual" sublabel="Subí una imagen con el estilo que querés replicar">
-              <div
-                onClick={() => styleRefInputRef.current?.click()}
-                style={{
-                  border: "2px dashed rgba(236, 72, 153, 0.3)",
-                  borderRadius: 12,
-                  padding: styleRefPreview ? 0 : 16,
-                  textAlign: "center",
-                  cursor: "pointer",
-                  overflow: "hidden",
-                  transition: "border-color 0.2s",
-                  background: "rgba(236, 72, 153, 0.05)",
-                }}
-              >
-                {styleRefPreview ? (
-                  <img
-                    src={styleRefPreview}
-                    alt="Style ref"
-                    style={{ width: "100%", maxHeight: 140, objectFit: "cover", display: "block" }}
-                  />
-                ) : (
-                  <>
-                    <div style={{ fontSize: 24, marginBottom: 4 }}>🎨</div>
-                    <div style={{ fontSize: 12, color: "#71717a" }}>Click para subir estilo visual</div>
-                  </>
-                )}
-                <input
-                  ref={styleRefInputRef}
-                  type="file"
-                  accept="image/*"
-                  onChange={handleStyleRefUpload}
-                  style={{ display: "none" }}
-                />
-              </div>
-            </FieldGroup>
-          )}
-
-          {/* Script */}
-          <FieldGroup label="Guion del Carrusel" sublabel="El texto completo a distribuir en los slides">
-            <textarea
-              value={script}
-              onChange={(e) => setScript(e.target.value)}
-              placeholder={`Slide 1: ¿Sabías que el 90% de los negocios fracasan en el primer año?\n\nSlide 2: El problema es que nadie te enseña a vender...\n\nSlide 3: Con nuestro método probado vas a...\n\nSlide 4: Más de 500 alumnos ya lo lograron...\n\nSlide 5: Comenta GRATIS y te envío la guía completa`}
-              rows={8}
-              style={{ ...inputStyle, resize: "vertical", minHeight: 140, lineHeight: 1.5 }}
+          <label style={lbl}>🔑 API Key — Gemini</label>
+          <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+            <input
+              type={showKey ? "text" : "password"}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="Pegá tu API Key de Google AI Studio"
+              style={{ ...inp, fontSize: 13, flex: 1 }}
             />
-          </FieldGroup>
-
-          {/* Cost Estimator */}
-          {(() => {
-            const pricing = {
-              "gemini-2.5-flash-image": { perImage: 0.039, label: "Nano Banana" },
-              "gemini-3.1-flash-image-preview": { perImage: 0.067, label: "Nano Banana 2" },
-              "gemini-3-pro-image-preview": { perImage: 0.134, label: "Nano Banana Pro" },
-            };
-            const p = pricing[model] || pricing["gemini-2.5-flash-image"];
-            const total = (p.perImage * numSlides).toFixed(2);
-            const perImg = p.perImage.toFixed(3);
-            return (
-              <div
-                style={{
-                  background: "rgba(139, 92, 246, 0.06)",
-                  border: "1px solid rgba(139, 92, 246, 0.15)",
-                  borderRadius: 8,
-                  padding: "8px 12px",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
-                <span style={{ fontSize: 11, color: "#a1a1aa" }}>
-                  {p.label} · {numSlides} slides · ${perImg}/img
-                </span>
-                <span style={{ fontSize: 14, fontWeight: 700, color: "#c4b5fd" }}>
-                  ~${total}
-                </span>
-              </div>
-            );
-          })()}
-
-          {/* Generate + Cancel Buttons */}
-          <div style={{ display: "flex", gap: 8 }}>
             <button
-              onClick={generating ? handleCancel : handleGenerate}
-              style={{
-                flex: 1,
-                padding: "14px 20px",
-                borderRadius: 12,
-                border: "none",
-                background: generating
-                  ? "rgba(139, 92, 246, 0.3)"
-                  : "linear-gradient(135deg, #8b5cf6, #7c3aed)",
-                color: "#fff",
-                fontSize: 14,
-                fontWeight: 700,
-                cursor: "pointer",
-                letterSpacing: "0.02em",
-                transition: "all 0.2s",
-                boxShadow: generating ? "none" : "0 4px 20px rgba(139, 92, 246, 0.3)",
-              }}
-            >
-              {generating ? `Generando Slide ${currentSlide}/${totalToGenerate}...` : "🍌 Generar Carrusel Maestro"}
-            </button>
-            {generating && (
-              <button
-                onClick={handleCancel}
-                style={{
-                  padding: "14px 16px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(239, 68, 68, 0.4)",
-                  background: "rgba(239, 68, 68, 0.15)",
-                  color: "#f87171",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  cursor: "pointer",
-                  transition: "all 0.2s",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                ✕ Cancelar
-              </button>
-            )}
+              onClick={() => setShowKey(!showKey)}
+              style={{ padding: "8px 12px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(212,168,83,0.2)", borderRadius: 8, color: "#8a7a5a", fontSize: 13, cursor: "pointer", flexShrink: 0 }}
+            >{showKey ? "🙈" : "👁"}</button>
           </div>
+          <p style={{ margin: "0 0 20px", fontSize: 11, color: "#5a5040", lineHeight: 1.5 }}>
+            Obtenela gratis en <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style={{ color: "#d4a853", textDecoration: "none" }}>aistudio.google.com</a> → Get API Key
+          </p>
 
-          {/* Error */}
-          {error && (
-            <div
-              style={{
-                background: "rgba(239, 68, 68, 0.1)",
-                border: "1px solid rgba(239, 68, 68, 0.3)",
-                borderRadius: 8,
-                padding: "10px 14px",
-                fontSize: 12,
-                color: "#fca5a5",
-              }}
-            >
-              {error}
-            </div>
-          )}
-
-          {/* Progress Log */}
-          {log.length > 0 && (
-            <FieldGroup label="Log de Generación">
-              <div
-                style={{
-                  background: "rgba(0,0,0,0.4)",
-                  borderRadius: 8,
-                  padding: 12,
-                  maxHeight: 180,
-                  overflowY: "auto",
-                  fontSize: 11,
-                  fontFamily: "'SF Mono', 'Fira Code', monospace",
-                  lineHeight: 1.7,
-                  color: "#a1a1aa",
-                }}
-              >
-                {log.map((l, i) => (
-                  <div key={i} style={{ color: l.includes("✓") ? "#4ade80" : l.includes("✗") ? "#f87171" : "#a1a1aa" }}>
-                    {l}
-                  </div>
-                ))}
-              </div>
-            </FieldGroup>
-          )}
-        </div>
-
-        {/* ============ RIGHT PANEL: SLIDE VIEWER ============ */}
-        <div style={{ flex: 1, padding: 24, overflowY: "auto" }}>
-          {slides.length === 0 && !generating ? (
-            <EmptyState />
-          ) : (
-            <>
-              {/* Download All */}
-              {completedSlides.length > 1 && (
-                <div style={{ marginBottom: 20, display: "flex", justifyContent: "flex-end" }}>
-                  <button onClick={() => downloadAllAsZip(completedSlides)} style={secondaryBtnStyle}>
-                    📦 Descargar Todo (ZIP)
-                  </button>
-                </div>
-              )}
-
-              {/* Slides Grid — compact layout, 3 per row */}
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
-                  gap: 12,
-                }}
-              >
-                {slides.map((slide, i) => (
-                  <SlideCard key={i} slide={slide} />
-                ))}
-
-                {/* Placeholder for slides being generated */}
-                {generating &&
-                  Array.from({ length: totalToGenerate - slides.length }).map((_, i) => (
-                    <div
-                      key={`placeholder-${i}`}
-                      style={{
-                        aspectRatio: "1",
-                        borderRadius: 8,
-                        border: "1px dashed rgba(139, 92, 246, 0.2)",
-                        background: "rgba(139, 92, 246, 0.03)",
-                        display: "flex",
-                        flexDirection: "column",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        gap: 8,
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: 20,
-                          height: 20,
-                          border: "2px solid rgba(139, 92, 246, 0.15)",
-                          borderTopColor: "#8b5cf6",
-                          borderRadius: "50%",
-                          animation: "spin 1s linear infinite",
-                        }}
-                      />
-                      <span style={{ fontSize: 10, color: "#52525b" }}>
-                        S{slides.length + i + 1}
-                      </span>
+          {/* Expert */}
+          <label style={lbl}>Fotos del experto <span style={{ fontSize: 11, color: "#6a5f48", textTransform: "none", letterSpacing: 0 }}>(1 obligatoria + hasta 3 opcionales)</span></label>
+          <div style={{ marginBottom: 20, padding: 14, background: "rgba(255,255,255,0.02)", border: "1px dashed rgba(212,168,83,0.25)", borderRadius: 10 }}>
+            {expertPhotos.length > 0 ? (
+              <>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+                  {expertPhotos.map((ep, i) => (
+                    <div key={i} style={{ position: "relative" }}>
+                      <div style={{ width: 72, height: 72, borderRadius: 10, overflow: "hidden", border: i === 0 ? "2px solid #d4a853" : "2px solid rgba(212,168,83,0.25)" }}>
+                        <img src={ep.preview} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      </div>
+                      <button onClick={() => removeExpertPhoto(i)} style={{
+                        position: "absolute", top: -6, right: -6, width: 20, height: 20,
+                        borderRadius: "50%", background: "#ff4444", border: "none",
+                        color: "#fff", fontSize: 11, cursor: "pointer", display: "flex",
+                        alignItems: "center", justifyContent: "center", lineHeight: 1,
+                      }}>✕</button>
+                      {i === 0 && <span style={{ position: "absolute", bottom: -4, left: "50%", transform: "translateX(-50%)", fontSize: 9, color: "#d4a853", background: "#0d0d15", padding: "1px 5px", borderRadius: 4 }}>principal</span>}
                     </div>
                   ))}
+                  {expertPhotos.length < 4 && (
+                    <div onClick={() => fileRef.current?.click()} style={{
+                      width: 72, height: 72, borderRadius: 10, border: "1px dashed rgba(212,168,83,0.3)",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      cursor: "pointer", fontSize: 24, color: "#5a5040",
+                    }}>+</div>
+                  )}
+                </div>
+                <p style={{ margin: 0, fontSize: 11, color: "#6a5f48" }}>
+                  {expertPhotos.length}/4 fotos · Más fotos = mejor parecido
+                </p>
+              </>
+            ) : (
+              <div onClick={() => fileRef.current?.click()} style={{ textAlign: "center", cursor: "pointer", padding: "8px 0" }}>
+                <div style={{ fontSize: 28, marginBottom: 4, opacity: 0.5 }}>📷</div>
+                <p style={{ margin: 0, fontSize: 14, color: "#8a7a5a" }}>Click para subir foto del experto</p>
+                <p style={{ margin: "4px 0 0", fontSize: 11, color: "#5a5040" }}>Subí varias fotos (distintos ángulos) para mejor parecido</p>
+              </div>
+            )}
+            <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={handleUpload} style={{ display: "none" }} />
+          </div>
+
+          {/* Slides */}
+          <label style={lbl}>Contenido de los slides</label>
+          <div style={{ marginBottom: 8, padding: "10px 14px", background: "rgba(212,168,83,0.04)", border: "1px solid rgba(212,168,83,0.12)", borderRadius: 8, fontSize: 12, color: "#8a7a5a", lineHeight: 1.6 }}>
+            <strong style={{ color: "#a89870" }}>Formato por slide:</strong><br />
+            <span style={{ color: "#d4a853" }}>ESCENA:</span> qué se ve en la imagen (prompt para la IA)<br />
+            <span style={{ color: "#d4a853" }}>TEXTO:</span> texto exacto que va encima<br />
+            Separá slides con <strong style={{ color: "#a89870" }}>---</strong>
+          </div>
+          <textarea
+            value={slideText}
+            onChange={(e) => setSlideText(e.target.value)}
+            placeholder={`ESCENA: el experto frustrado mirando gráficos que bajan en una pantalla
+TEXTO: ¿Tu equipo no cierra ventas?
+El problema no son ellos...
+---
+ESCENA: el experto señalando una pizarra con estadísticas
+TEXTO: El 67% de los vendedores renuncia por mal liderazgo
+No es el sueldo. Es cómo los tratan.
+---
+ESCENA: el experto con brazos cruzados mirando a cámara, seguro
+TEXTO: ¿Querés la solución completa?`}
+            rows={14}
+            style={{ ...inp, padding: "14px 16px", resize: "vertical", lineHeight: 1.7, fontSize: 14 }}
+          />
+
+          <div style={{ marginTop: 8, fontSize: 13, color: count >= 2 ? "#6abf6a" : count === 0 ? "#6a5f48" : "#e85555", display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: count >= 2 ? "#6abf6a" : count === 0 ? "#4a4535" : "#e85555" }} />
+            {count === 0 ? "Escribí el contenido" : `${count} slide${count !== 1 ? "s" : ""} detectado${count !== 1 ? "s" : ""}${count < 2 ? " — mínimo 2" : ""}`}
+          </div>
+
+          {/* Keyword */}
+          <div style={{ marginTop: 18 }}>
+            <label style={lbl}>Palabra clave CTA <span style={{ fontSize: 11, color: "#6a5f48", textTransform: "none", letterSpacing: 0 }}>(opcional)</span></label>
+            <input value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="Ej: CLASE" style={inp} />
+          </div>
+
+          {/* Style */}
+          <label style={{ ...lbl, marginTop: 22, marginBottom: 10 }}>Estilo visual</label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            {IMAGE_STYLES.map((s) => (
+              <div key={s.id} style={{ position: "relative" }}>
+                <button onClick={() => { setSelectedStyle(s.id); if (s.id !== "libre") { setLibreRef(null); if (libreFileRef.current) libreFileRef.current.value = ""; } }} style={{
+                  width: "100%", padding: "14px 10px",
+                  background: selectedStyle === s.id ? "rgba(212,168,83,0.15)" : "rgba(255,255,255,0.03)",
+                  border: selectedStyle === s.id ? "2px solid rgba(212,168,83,0.5)" : "1px solid rgba(255,255,255,0.08)",
+                  borderRadius: 10, cursor: "pointer", color: "#e8e0d0", fontSize: 14, fontFamily: "inherit",
+                  transition: "all 0.2s", fontWeight: selectedStyle === s.id ? 600 : 400,
+                }}>
+                  {s.name}
+                </button>
+                {s.id === "before_after" && (
+                  <span
+                    onMouseEnter={() => setTooltipVisible(true)}
+                    onMouseLeave={() => setTooltipVisible(false)}
+                    style={{ position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: "50%", background: "rgba(212,168,83,0.3)", border: "1px solid rgba(212,168,83,0.5)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#d4a853", cursor: "help", fontWeight: 700 }}
+                  >?
+                    {tooltipVisible && (
+                      <div style={{ position: "absolute", bottom: 28, right: -10, width: 280, padding: "14px 16px", background: "#1a1a2e", border: "1px solid rgba(212,168,83,0.3)", borderRadius: 10, fontSize: 12, color: "#c9b99a", lineHeight: 1.6, zIndex: 100, boxShadow: "0 8px 30px rgba(0,0,0,0.5)", textAlign: "left", fontWeight: 400 }}>
+                        <strong style={{ color: "#d4a853", display: "block", marginBottom: 6 }}>Formato Antes/Después</strong>
+                        En <strong style={{ color: "#e8e0d0" }}>ESCENA:</strong> describí ambos paneles:<br/>
+                        <span style={{ color: "#8a7a5a" }}>"Arriba: equipo desmotivado, oficina oscura. Abajo: equipo celebrando, oficina moderna"</span><br/><br/>
+                        En <strong style={{ color: "#e8e0d0" }}>TEXTO:</strong> la primera línea va en el panel de arriba y el resto en el de abajo:<br/>
+                        <span style={{ color: "#8a7a5a" }}>Sin proceso de ventas<br/>Con proceso: equipo que factura x3</span><br/><br/>
+                        💡 <strong>Tip:</strong> Usá contrastes fuertes (oscuro vs claro, fracaso vs éxito) para mayor impacto.
+                      </div>
+                    )}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Libre: style reference upload */}
+          {selectedStyle === "libre" && (
+            <div style={{ marginTop: 12, padding: 14, background: "rgba(255,255,255,0.02)", border: "1px dashed rgba(212,168,83,0.25)", borderRadius: 10 }}>
+              {libreRef ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{ width: 56, height: 56, borderRadius: 8, overflow: "hidden", border: "2px solid rgba(212,168,83,0.3)", flexShrink: 0 }}>
+                    <img src={libreRef.preview} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <p style={{ margin: 0, fontSize: 13, color: "#c9b99a" }}>Imagen de referencia cargada</p>
+                    <p style={{ margin: "3px 0 0", fontSize: 11, color: "#6a5f48" }}>La IA copiará este estilo visual</p>
+                  </div>
+                  <button onClick={() => { setLibreRef(null); if (libreFileRef.current) libreFileRef.current.value = ""; }} style={{ padding: "4px 10px", background: "rgba(255,80,80,0.1)", border: "1px solid rgba(255,80,80,0.3)", borderRadius: 6, color: "#ff6b6b", fontSize: 11, cursor: "pointer" }}>✕</button>
+                </div>
+              ) : (
+                <div onClick={() => libreFileRef.current?.click()} style={{ textAlign: "center", cursor: "pointer", padding: "4px 0" }}>
+                  <span style={{ fontSize: 24, opacity: 0.5 }}>🖼️</span>
+                  <p style={{ margin: "4px 0 0", fontSize: 13, color: "#8a7a5a" }}>Subí una imagen de ejemplo</p>
+                  <p style={{ margin: "3px 0 0", fontSize: 11, color: "#5a5040" }}>La IA replicará el estilo visual de esta imagen</p>
+                </div>
+              )}
+              <input ref={libreFileRef} type="file" accept="image/jpeg,image/png,image/webp" onChange={async (e) => {
+                const f = e.target.files?.[0]; if (!f) return;
+                setLibreRef({ base64: await fileToBase64(f), mimeType: f.type, preview: URL.createObjectURL(f) });
+              }} style={{ display: "none" }} />
+            </div>
+          )}
+
+          {hasExpert && (
+            <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(212,168,83,0.06)", border: "1px solid rgba(212,168,83,0.15)", borderRadius: 8, fontSize: 12, color: "#a89870" }}>
+              💡 {expertPhotos.length} foto{expertPhotos.length > 1 ? "s" : ""} del experto en estilo <strong style={{ color: "#d4a853" }}>{style.name}</strong>
+            </div>
+          )}
+
+          {/* Generate */}
+          <button onClick={generate} disabled={generating || count < 2 || !apiKey.trim()} style={{
+            width: "100%", marginTop: 22, padding: "16px",
+            background: generating ? "rgba(212,168,83,0.2)" : "linear-gradient(135deg, #d4a853, #a88230)",
+            border: "none", borderRadius: 10, color: generating ? "#a89870" : "#0a0a0a",
+            fontSize: 16, fontWeight: 700, cursor: generating ? "not-allowed" : "pointer",
+            letterSpacing: 1, textTransform: "uppercase", transition: "all 0.3s",
+          }}>
+            {generating ? "Generando..." : `Generar ${count} Slides`}
+          </button>
+
+          {generating && (
+            <div style={{ marginTop: 18 }}>
+              <div style={{ height: 4, background: "rgba(255,255,255,0.06)", borderRadius: 2, overflow: "hidden" }}>
+                <div style={{ height: "100%", background: "linear-gradient(90deg, #d4a853, #e8c468)", width: totalSteps ? `${(progress / totalSteps) * 100}%` : "0%", transition: "width 0.5s ease", borderRadius: 2 }} />
+              </div>
+              <p style={{ marginTop: 10, fontSize: 13, color: "#8a7a5a" }}>{status}</p>
+            </div>
+          )}
+          {!generating && status && (
+            <p style={{ marginTop: 14, fontSize: 13, color: status.startsWith("Error") ? "#e85555" : status.includes("sin") ? "#e8a849" : "#6abf6a" }}>{status}</p>
+          )}
+        </div>
+
+        {/* RIGHT */}
+        <div style={{ flex: 1, padding: "28px 40px", display: "flex", flexDirection: "column", alignItems: "center" }}>
+          {images.length === 0 && !generating && (
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#4a4535", textAlign: "center", maxWidth: 420 }}>
+              <div style={{ fontSize: 56, marginBottom: 16, opacity: 0.3 }}>🎨</div>
+              <p style={{ fontSize: 18, margin: 0 }}>Tu carrusel aparecerá aquí</p>
+              <p style={{ fontSize: 14, marginTop: 10, color: "#3a3525", lineHeight: 1.6 }}>
+                Usá <strong style={{ color: "#8a7a5a" }}>ESCENA:</strong> para el prompt visual y <strong style={{ color: "#8a7a5a" }}>TEXTO:</strong> para lo que va encima. Separá con <strong style={{ color: "#8a7a5a" }}>---</strong>
+              </p>
+            </div>
+          )}
+
+          {images.length > 0 && (
+            <>
+              <div style={{ width: "100%", maxWidth: 520, aspectRatio: "1", borderRadius: 12, overflow: "hidden", boxShadow: "0 20px 60px rgba(0,0,0,0.5), 0 0 0 1px rgba(212,168,83,0.1)" }}>
+                <img src={images[idx]?.dataUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 16, marginTop: 20 }}>
+                <button onClick={() => setIdx(Math.max(0, idx - 1))} disabled={idx === 0} style={{ padding: "8px 16px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(212,168,83,0.2)", borderRadius: 6, color: "#d4a853", cursor: idx === 0 ? "not-allowed" : "pointer", fontSize: 18, opacity: idx === 0 ? 0.3 : 1 }}>←</button>
+                <span style={{ fontSize: 14, color: "#8a7a5a", minWidth: 80, textAlign: "center" }}>{idx + 1} / {images.length}</span>
+                <button onClick={() => setIdx(Math.min(images.length - 1, idx + 1))} disabled={idx === images.length - 1} style={{ padding: "8px 16px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(212,168,83,0.2)", borderRadius: 6, color: "#d4a853", cursor: idx === images.length - 1 ? "not-allowed" : "pointer", fontSize: 18, opacity: idx === images.length - 1 ? 0.3 : 1 }}>→</button>
+              </div>
+
+              <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap", justifyContent: "center" }}>
+                {images.map((img, i) => (
+                  <button key={i} onClick={() => setIdx(i)} style={{
+                    width: 60, height: 60, padding: 0,
+                    border: idx === i ? "2px solid #d4a853" : img.failed ? "2px solid rgba(232,168,73,0.3)" : "2px solid rgba(255,255,255,0.08)",
+                    borderRadius: 8, overflow: "hidden", cursor: "pointer",
+                    opacity: idx === i ? 1 : 0.6, transition: "all 0.2s", background: "none",
+                  }}>
+                    <img src={img.dataUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ display: "flex", gap: 12, marginTop: 24, flexWrap: "wrap", justifyContent: "center" }}>
+                <button onClick={downloadZip} style={{ padding: "14px 32px", background: "linear-gradient(135deg, #d4a853, #a88230)", border: "none", borderRadius: 8, color: "#0a0a0a", fontSize: 15, fontWeight: 700, cursor: "pointer", letterSpacing: 0.5 }}>⬇ Descargar ZIP</button>
+                <button onClick={() => retrySlide(idx)} disabled={generating} style={{ padding: "14px 24px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(212,168,83,0.3)", borderRadius: 8, color: "#d4a853", fontSize: 15, cursor: "pointer" }}>🔄 Regenerar slide {idx + 1}</button>
               </div>
             </>
           )}
         </div>
       </div>
 
-      {/* Spinner keyframes */}
-      <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-        input::placeholder, textarea::placeholder { color: #52525b; }
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: rgba(139,92,246,0.2); border-radius: 3px; }
-      `}</style>
+      <canvas ref={canvasRef} style={{ display: "none" }} />
     </div>
   );
 }
-
-// ============ SUB-COMPONENTS ============
-
-function FieldGroup({ label, sublabel, children, style: wrapperStyle }) {
-  return (
-    <div style={wrapperStyle}>
-      <label style={{ display: "block", marginBottom: 6 }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: "#d4d4d8" }}>{label}</span>
-        {sublabel && <span style={{ fontSize: 11, color: "#52525b", marginLeft: 8 }}>{sublabel}</span>}
-      </label>
-      {children}
-    </div>
-  );
-}
-
-function SlideCard({ slide }) {
-  return (
-    <div
-      style={{
-        borderRadius: 8,
-        overflow: "hidden",
-        border: "1px solid rgba(139, 92, 246, 0.15)",
-        background: "rgba(255,255,255,0.02)",
-        animation: "fadeIn 0.4s ease",
-      }}
-    >
-      {/* Slide header — compact */}
-      <div
-        style={{
-          padding: "4px 8px",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          background: "rgba(139, 92, 246, 0.06)",
-          borderBottom: "1px solid rgba(139, 92, 246, 0.1)",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span
-            style={{
-              fontSize: 9,
-              fontWeight: 700,
-              padding: "1px 6px",
-              borderRadius: 3,
-              background:
-                slide.role === "HOOK"
-                  ? "rgba(234, 179, 8, 0.2)"
-                  : slide.role === "CTA"
-                  ? "rgba(34, 197, 94, 0.2)"
-                  : slide.role === "PROBLEM"
-                  ? "rgba(239, 68, 68, 0.2)"
-                  : "rgba(59, 130, 246, 0.2)",
-              color:
-                slide.role === "HOOK"
-                  ? "#fbbf24"
-                  : slide.role === "CTA"
-                  ? "#4ade80"
-                  : slide.role === "PROBLEM"
-                  ? "#f87171"
-                  : "#60a5fa",
-              letterSpacing: "0.06em",
-            }}
-          >
-            {slide.role}
-          </span>
-          <span style={{ fontSize: 10, color: "#71717a" }}>S{slide.index + 1}</span>
-        </div>
-        {slide.imageData && (
-          <button
-            onClick={() => downloadImage(slide.imageData, `slide_${slide.index + 1}.png`)}
-            style={{
-              background: "none",
-              border: "1px solid rgba(139, 92, 246, 0.3)",
-              borderRadius: 4,
-              padding: "2px 6px",
-              fontSize: 9,
-              color: "#8b5cf6",
-              cursor: "pointer",
-            }}
-          >
-            ↓
-          </button>
-        )}
-      </div>
-
-      {/* Slide content */}
-      {slide.imageData ? (
-        <img src={slide.imageData} alt={`Slide ${slide.index + 1}`} style={{ width: "100%", display: "block" }} />
-      ) : slide.error ? (
-        <div
-          style={{
-            aspectRatio: "1",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 12,
-            textAlign: "center",
-          }}
-        >
-          <div>
-            <div style={{ fontSize: 20, marginBottom: 4 }}>⚠️</div>
-            <div style={{ fontSize: 10, color: "#f87171", lineHeight: 1.4 }}>{slide.error}</div>
-          </div>
-        </div>
-      ) : null}
-
-      {/* Text preview — compact */}
-      <div
-        style={{
-          padding: "4px 8px",
-          fontSize: 9,
-          color: "#71717a",
-          borderTop: "1px solid rgba(255,255,255,0.04)",
-          lineHeight: 1.3,
-          maxHeight: 36,
-          overflow: "hidden",
-        }}
-      >
-        {slide.text?.substring(0, 80)}
-        {slide.text?.length > 80 ? "..." : ""}
-      </div>
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div
-      style={{
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        textAlign: "center",
-        padding: 40,
-        opacity: 0.6,
-      }}
-    >
-      <div style={{ fontSize: 56, marginBottom: 16 }}>🍌</div>
-      <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 8, color: "#d4d4d8" }}>
-        Tu carrusel te espera
-      </h2>
-      <p style={{ fontSize: 13, color: "#71717a", maxWidth: 360, lineHeight: 1.6 }}>
-        Configura los parámetros a la izquierda: sube la foto del experto, pega tu guion y presiona
-        "Generar Carrusel Maestro" para que Nano Banano haga su magia.
-      </p>
-      <div
-        style={{
-          marginTop: 24,
-          display: "flex",
-          gap: 20,
-          fontSize: 11,
-          color: "#52525b",
-        }}
-      >
-        <div>
-          <div style={{ fontSize: 20, marginBottom: 4 }}>📸</div>
-          Sube foto
-        </div>
-        <div style={{ color: "#3f3f46" }}>→</div>
-        <div>
-          <div style={{ fontSize: 20, marginBottom: 4 }}>📝</div>
-          Pega guion
-        </div>
-        <div style={{ color: "#3f3f46" }}>→</div>
-        <div>
-          <div style={{ fontSize: 20, marginBottom: 4 }}>🎨</div>
-          Genera slides
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ============ SHARED STYLES ============
-
-const inputStyle = {
-  width: "100%",
-  padding: "10px 12px",
-  borderRadius: 8,
-  border: "1px solid rgba(255,255,255,0.08)",
-  background: "rgba(255,255,255,0.04)",
-  color: "#e4e4e7",
-  fontSize: 13,
-  outline: "none",
-  boxSizing: "border-box",
-  transition: "border-color 0.2s",
-};
-
-const secondaryBtnStyle = {
-  padding: "8px 16px",
-  borderRadius: 8,
-  border: "1px solid rgba(139, 92, 246, 0.3)",
-  background: "rgba(139, 92, 246, 0.1)",
-  color: "#c4b5fd",
-  fontSize: 13,
-  fontWeight: 600,
-  cursor: "pointer",
-};
